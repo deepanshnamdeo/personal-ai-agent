@@ -35,10 +35,25 @@ agent:
   max-iterations: 10
   memory:
     short-term:
-      ttl-minutes: 60          # Redis conversation window TTL
-      max-messages: 20         # sliding window — keeps last N messages
+      ttl-minutes: 60       # Redis conversation window TTL
+      max-messages: 20      # sliding window size
     long-term:
-      max-facts-per-user: 500  # cap stored facts per user in PostgreSQL
+      max-facts-per-user: 500
+
+tools:
+  web-search:
+    brave:
+      api-key: ${BRAVE_API_KEY:}
+      base-url: https://api.search.brave.com/res/v1
+      max-results: 5
+  rest-api-caller:
+    connect-timeout-ms: 5000
+    read-timeout-ms: 10000
+    allowed-domains: ${TOOL_ALLOWED_DOMAINS:}
+  database:
+    readable-tables: ${DB_READABLE_TABLES:agent_memories,agent_sessions}
+    writable-tables: ${DB_WRITABLE_TABLES:}
+    max-result-rows: 100
 
 logging:
   level:
