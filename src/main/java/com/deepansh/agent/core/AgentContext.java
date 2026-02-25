@@ -5,12 +5,9 @@ import com.deepansh.agent.model.ToolCall;
 import lombok.Builder;
 import lombok.Data;
 
+import java.util.ArrayList;
 import java.util.List;
 
-/**
- * Holds all mutable state for a single agent run.
- * Passed through the ReAct loop instead of scattered fields on AgentLoop.
- */
 @Data
 @Builder
 public class AgentContext {
@@ -18,7 +15,12 @@ public class AgentContext {
     private String sessionId;
     private String userId;
     private String userInput;
-    private List<Message> messages;
-    private List<ToolCall> executedToolCalls;
+
+    @Builder.Default
+    private List<Message> messages = new ArrayList<>();
+
+    @Builder.Default
+    private List<ToolCall> executedToolCalls = new ArrayList<>();
+
     private int currentIteration;
 }

@@ -10,21 +10,12 @@ import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
 
-/**
- * Tracks metadata for each agent session in PostgreSQL.
- *
- * Useful for:
- * - Listing a user's recent sessions
- * - Knowing how many turns a session had (for debugging/analytics)
- * - Linking long-term memories back to their source session
- * - Future: session summaries (compress old sessions into one memory entry)
- */
 @Entity
 @Table(
     name = "agent_sessions",
     indexes = {
-        @Index(name = "idx_session_user_id", columnList = "userId"),
-        @Index(name = "idx_session_updated_at", columnList = "updatedAt")
+        @Index(name = "idx_session_user_id",    columnList = "user_id"),
+        @Index(name = "idx_session_updated_at", columnList = "updated_at")
     }
 )
 @Data
@@ -36,20 +27,21 @@ public class SessionMetadata {
     @Id
     private String sessionId;
 
-    @Column(nullable = false)
+    @Column(name = "user_id", nullable = false)
     private String userId;
 
     @Builder.Default
+    @Column(name = "turn_count")
     private int turnCount = 0;
 
-    /** Short summary of what was discussed — populated post-session */
     @Column(length = 1000)
     private String summary;
 
     @CreationTimestamp
-    @Column(updatable = false)
+    @Column(name = "created_at", updatable = false)
     private Instant createdAt;
 
     @UpdateTimestamp
+    @Column(name = "updated_at")
     private Instant updatedAt;
 }

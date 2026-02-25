@@ -18,7 +18,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-@Component
+@Component("openAiClient")
 @Slf4j
 public class OpenAiClient implements LlmClient {
 
@@ -134,7 +134,7 @@ public class OpenAiClient implements LlmClient {
             }
 
             return LlmResponse.builder()
-                    .isToolCall(true)
+                    .toolCallRequired(true)
                     .promptTokens(promptTokens)
                     .completionTokens(completionTokens)
                     .toolCall(ToolCall.builder()
@@ -146,7 +146,7 @@ public class OpenAiClient implements LlmClient {
         }
 
         return LlmResponse.builder()
-                .isToolCall(false)
+                .toolCallRequired(false)
                 .content((String) message.get("content"))
                 .promptTokens(promptTokens)
                 .completionTokens(completionTokens)

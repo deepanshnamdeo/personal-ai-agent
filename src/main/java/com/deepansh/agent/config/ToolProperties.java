@@ -11,7 +11,6 @@ import java.util.List;
  * Strongly-typed configuration for all tools.
  * Bound from application.yml under the "tools" prefix.
  */
-@Component
 @ConfigurationProperties(prefix = "tools")
 @Data
 public class ToolProperties {

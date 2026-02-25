@@ -39,9 +39,14 @@ public class DatabaseQueryTool implements AgentTool {
                     "EXECUTE", "EXEC", "CALL", "--", "/*");
 
     // Extracts the first word (statement type) and first table name from SQL
-    private static final Pattern STATEMENT_PATTERN =
-            Pattern.compile("^\\s*(\\w+)\\s+.*?(?:FROM|INTO|UPDATE)\\s+(\\w+)",
+    // Matches: SELECT ... FROM table, INSERT INTO table, UPDATE table
+    private static final Pattern SELECT_INSERT_PATTERN =
+            Pattern.compile("^\\s*(SELECT|INSERT)\\s+.*?(?:FROM|INTO)\\s+(\\w+)",
                     Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
+
+    private static final Pattern UPDATE_PATTERN =
+            Pattern.compile("^\\s*(UPDATE)\\s+(\\w+)",
+                    Pattern.CASE_INSENSITIVE);
 
     private final JdbcTemplate jdbcTemplate;
     private final ToolProperties toolProperties;
@@ -207,9 +212,15 @@ public class DatabaseQueryTool implements AgentTool {
     }
 
     private StatementInfo parseStatement(String sql) {
-        Matcher m = STATEMENT_PATTERN.matcher(sql);
-        if (!m.find()) return null;
-        return new StatementInfo(m.group(1).toUpperCase(), m.group(2).toLowerCase());
+        Matcher m = UPDATE_PATTERN.matcher(sql);
+        if (m.find()) {
+            return new StatementInfo(m.group(1).toUpperCase(), m.group(2).toLowerCase());
+        }
+        m = SELECT_INSERT_PATTERN.matcher(sql);
+        if (m.find()) {
+            return new StatementInfo(m.group(1).toUpperCase(), m.group(2).toLowerCase());
+        }
+        return null;
     }
 
     private String checkTableAllowlist(StatementInfo info) {

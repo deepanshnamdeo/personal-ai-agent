@@ -25,7 +25,7 @@ spring:
       timeout: 2000ms
 
 openai:
-  api-key: ${OPENAI_API_KEY}
+  api-key: ${OPENAI_API_KEY:dummy-key-for-compile}
   base-url: https://api.openai.com/v1
   model: gpt-4o
   max-tokens: 4096
@@ -35,8 +35,8 @@ agent:
   max-iterations: 10
   memory:
     short-term:
-      ttl-minutes: 60       # Redis conversation window TTL
-      max-messages: 20      # sliding window size
+      ttl-minutes: 60
+      max-messages: 20
     long-term:
       max-facts-per-user: 500
 
@@ -54,44 +54,40 @@ tools:
     readable-tables: ${DB_READABLE_TABLES:agent_memories,agent_sessions}
     writable-tables: ${DB_WRITABLE_TABLES:}
     max-result-rows: 100
+  file-ops:
+    base-directory: ${AGENT_FILES_DIR:./agent-files}
+    max-file-size-kb: 512
+    allowed-extensions: txt,md,json,csv,yaml,yml,log
 
-logging:
-  level:
-    com.deepansh.agent: DEBUG
-    org.springframework.web: INFO
-
-# Resilience4j — LLM client circuit breaker + retry
 resilience4j:
   retry:
     instances:
       llmClient:
         max-attempts: 3
         wait-duration: 2s
-        exponential-backoff-multiplier: 2     # 2s → 4s → 8s
+        exponential-backoff-multiplier: 2
         retry-exceptions:
           - org.springframework.web.client.ResourceAccessException
           - org.springframework.web.client.HttpServerErrorException
         ignore-exceptions:
-          - com.deepansh.agent.exception.AgentException  # don't retry logic errors
+          - com.deepansh.agent.exception.AgentException
       toolExecution:
         max-attempts: 2
         wait-duration: 1s
         retry-exceptions:
           - org.springframework.web.client.ResourceAccessException
-
   circuitbreaker:
     instances:
       llmClient:
         sliding-window-size: 10
-        failure-rate-threshold: 50            # open after 50% failures in last 10 calls
+        failure-rate-threshold: 50
         wait-duration-in-open-state: 30s
         permitted-calls-in-half-open-state: 3
-        slow-call-duration-threshold: 30s     # 30s = slow LLM call
+        slow-call-duration-threshold: 30s
         slow-call-rate-threshold: 80
         register-health-indicator: true
 
-tools:
-  file-ops:
-    base-directory: ${AGENT_FILES_DIR:./agent-files}
-    max-file-size-kb: 512
-    allowed-extensions: txt,md,json,csv,yaml,yml,log
+logging:
+  level:
+    com.deepansh.agent: DEBUG
+    org.springframework.web: INFO

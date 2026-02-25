@@ -13,9 +13,12 @@ public class LlmResponse {
     /** Non-null when the LLM wants to invoke a tool */
     private ToolCall toolCall;
 
-    private boolean isToolCall;
+    /**
+     * Use "toolCallRequired" instead of "isToolCall" to avoid Lombok's
+     * boolean getter generating "isIsToolCall()" naming conflict.
+     */
+    private boolean toolCallRequired;
 
-    // Token usage — populated from OpenAI usage block
     @Builder.Default
     private int promptTokens = 0;
 

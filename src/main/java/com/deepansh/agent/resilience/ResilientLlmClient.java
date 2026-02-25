@@ -57,7 +57,7 @@ public class ResilientLlmClient implements LlmClient {
                                       Exception ex) {
         log.error("LLM call failed after all retries: {}", ex.getMessage());
         return LlmResponse.builder()
-                .isToolCall(false)
+                .toolCallRequired(false)
                 .content("I'm temporarily unable to process your request due to a connection issue. " +
                          "Please try again in a moment.")
                 .build();
@@ -71,7 +71,7 @@ public class ResilientLlmClient implements LlmClient {
                                                Exception ex) {
         log.error("LLM circuit breaker is OPEN — rejecting call: {}", ex.getMessage());
         return LlmResponse.builder()
-                .isToolCall(false)
+                .toolCallRequired(false)
                 .content("The AI service is currently experiencing issues. " +
                          "Please try again in about 30 seconds.")
                 .build();

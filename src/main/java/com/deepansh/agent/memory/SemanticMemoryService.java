@@ -1,13 +1,13 @@
 package com.deepansh.agent.memory;
 
-import lombok.RequiredArgsConstructor;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 
@@ -34,15 +34,32 @@ import java.util.Map;
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
-public class SemanticMemoryService {
+public class SemanticMemoryService implements ApplicationContextAware {
 
     private static final int DEFAULT_TOP_K = 5;
-    private static final double SIMILARITY_THRESHOLD = 0.25; // cosine distance < 0.25 = relevant
+    private static final double SIMILARITY_THRESHOLD = 0.25;
 
     private final JdbcTemplate jdbcTemplate;
     private final EmbeddingService embeddingService;
     private final AgentMemoryRepository memoryRepository;
+    private ApplicationContext applicationContext;
+
+    public SemanticMemoryService(JdbcTemplate jdbcTemplate,
+                                  EmbeddingService embeddingService,
+                                  AgentMemoryRepository memoryRepository) {
+        this.jdbcTemplate = jdbcTemplate;
+        this.embeddingService = embeddingService;
+        this.memoryRepository = memoryRepository;
+    }
+
+    @Override
+    public void setApplicationContext(ApplicationContext ctx) {
+        this.applicationContext = ctx;
+    }
+
+    private SemanticMemoryService self() {
+        return applicationContext.getBean(SemanticMemoryService.class);
+    }
 
     /**
      * Semantic search: find the top-K most relevant memories for a query.
@@ -126,7 +143,7 @@ public class SemanticMemoryService {
 
         log.info("Backfilling {} embeddings for userId={}", unembedded.size(), userId);
 
-        unembedded.forEach(m -> embedMemoryAsync(m.getId(), m.getContent()));
+        unembedded.forEach(m -> self().embedMemoryAsync(m.getId(), m.getContent()));
         return unembedded.size();
     }
 

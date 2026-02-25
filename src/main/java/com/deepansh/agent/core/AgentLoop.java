@@ -140,7 +140,7 @@ public class AgentLoop {
             // Accumulate token usage per iteration
             runCtx.addTokens(llmResponse.getPromptTokens(), llmResponse.getCompletionTokens());
 
-            if (!llmResponse.isToolCall()) {
+            if (!llmResponse.isToolCallRequired()) {
                 context.getMessages().add(Message.builder()
                         .role(Message.Role.assistant)
                         .content(llmResponse.getContent())
