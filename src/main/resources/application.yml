@@ -33,7 +33,7 @@ groq:
   # llama3-groq-70b-8192-tool-use-preview is purpose-built for tool use and is more reliable.
   # If tool-use-preview is ever deprecated, fall back to llama-3.3-70b-versatile —
   # the XML recovery logic in GenericLlmClient will handle the occasional bad generation.
-  model: ${GROQ_MODEL:llama3-groq-70b-8192-tool-use-preview}
+  model: ${GROQ_MODEL:llama-3.3-70b-versatile}
   max-tokens: 4096
   temperature: 0.2
 
