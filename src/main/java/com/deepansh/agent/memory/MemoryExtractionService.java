@@ -6,32 +6,48 @@ import com.deepansh.agent.model.Message;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import lombok.RequiredArgsConstructor;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 
 /**
- * Automatically extracts memorable facts from a completed conversation
- * and persists them to long-term memory.
+ * Asynchronously extracts memorable facts from completed conversations.
  *
- * Runs @Async after every agent run — never blocks the user response.
+ * Key design decisions:
  *
- * Key fix: validates that the LLM response is actually a JSON array
- * BEFORE attempting to parse it. If the LLM returned a fallback/error
- * message (e.g. circuit breaker fired), we skip extraction silently
- * instead of crashing with JsonParseException.
+ * 1. Uses @Qualifier("activeLlmClient") directly — bypasses ResilientLlmClient
+ *    and its shared "llmClient" circuit breaker. Memory extraction failures
+ *    must NEVER affect the main agent's availability.
+ *
+ * 2. Has its own @CircuitBreaker("memoryExtraction") — independent CB state.
+ *    The main agent CB and memory extraction CB are completely isolated.
+ *
+ * 3. All failures are caught and logged — never propagated to the caller.
+ *    This is background best-effort work. User experience is unaffected.
+ *
+ * 4. Three guards before JSON parsing prevent JsonParseException when
+ *    the LLM returns prose instead of a JSON array (e.g. CB fallback text).
  */
 @Service
 @Slf4j
-@RequiredArgsConstructor
 public class MemoryExtractionService {
 
     private final LlmClient llmClient;
     private final LongTermMemory longTermMemory;
     private final ObjectMapper objectMapper;
+
+    public MemoryExtractionService(
+            @Qualifier("activeLlmClient") LlmClient llmClient,
+            LongTermMemory longTermMemory,
+            ObjectMapper objectMapper) {
+        this.llmClient = llmClient;
+        this.longTermMemory = longTermMemory;
+        this.objectMapper = objectMapper;
+    }
 
     @Async("memoryTaskExecutor")
     public void extractAndStore(String userId, String sessionId, List<Message> messages) {
@@ -56,9 +72,22 @@ public class MemoryExtractionService {
                     facts.size(), userId, sessionId);
 
         } catch (Exception e) {
-            // Never let extraction failure propagate — it's best-effort background work
             log.error("Memory extraction failed for session={}: {}", sessionId, e.getMessage());
         }
+    }
+
+    /**
+     * Makes the LLM call with its own circuit breaker.
+     * Falls back to empty list on any failure — never disrupts the main agent.
+     */
+    @CircuitBreaker(name = "memoryExtraction", fallbackMethod = "extractionCircuitBreakerFallback")
+    protected LlmResponse callLlmForExtraction(List<Message> extractionMessages) {
+        return llmClient.chat(extractionMessages, List.of());
+    }
+
+    protected LlmResponse extractionCircuitBreakerFallback(List<Message> messages, Exception ex) {
+        log.warn("Memory extraction circuit breaker open — skipping extraction: {}", ex.getMessage());
+        return LlmResponse.builder().toolCallRequired(false).content("[]").build();
     }
 
     private List<ExtractedFact> extractFacts(List<Message> messages) throws Exception {
@@ -70,27 +99,27 @@ public class MemoryExtractionService {
 
         String extractionPrompt = """
                 Analyze the following conversation and extract facts worth remembering about the user.
-                
+
                 Extract ONLY facts that would be useful in future conversations:
                 - Personal/professional facts (role, company, projects, skills)
                 - Stated preferences (communication style, tools, formats they like)
                 - Ongoing tasks or goals they mentioned
                 - Important context about their work or life
-                
+
                 DO NOT extract:
                 - Temporary or one-off requests
                 - Generic questions with no personal context
                 - Error messages or system messages
-                
+
                 Respond with ONLY a JSON array. No explanation, no markdown, no prose. Example:
                 [
                   {"content": "Works as a Java backend developer", "tag": "fact"},
                   {"content": "Prefers bullet-point summaries", "tag": "preference"}
                 ]
-                
+
                 Valid tags: fact, preference, task, context
                 If nothing is worth remembering, respond with exactly: []
-                
+
                 Conversation:
                 """ + conversationText;
 
@@ -104,36 +133,34 @@ public class MemoryExtractionService {
                 .content(extractionPrompt)
                 .build();
 
-        LlmResponse response = llmClient.chat(List.of(systemMsg, userMsg), List.of());
+        LlmResponse response = callLlmForExtraction(List.of(systemMsg, userMsg));
         String raw = response.getContent();
 
-        // Guard 1: null or blank response
+        // Guard 1: null/blank
         if (raw == null || raw.isBlank()) {
-            log.debug("LLM returned empty response during extraction — skipping");
+            log.debug("Empty extraction response — skipping");
             return List.of();
         }
 
-        // Strip markdown fences if present
+        // Strip markdown fences
         String cleaned = raw.strip()
                 .replaceAll("(?s)^```json\\s*", "")
                 .replaceAll("(?s)^```\\s*", "")
                 .replaceAll("(?s)```\\s*$", "")
                 .strip();
 
-        // Guard 2: response is not a JSON array (e.g. circuit breaker fallback text,
-        // or LLM returned prose instead of JSON)
+        // Guard 2: not a JSON array (CB fallback text, prose, etc.)
         if (!cleaned.startsWith("[")) {
-            log.warn("LLM extraction response is not a JSON array — skipping. " +
-                     "First 100 chars: '{}'", cleaned.substring(0, Math.min(100, cleaned.length())));
+            log.warn("Extraction response is not a JSON array — skipping. First 100 chars: '{}'",
+                    cleaned.substring(0, Math.min(100, cleaned.length())));
             return List.of();
         }
 
-        // Guard 3: parse defensively — catch malformed JSON without crashing
+        // Guard 3: parse defensively
         try {
             return objectMapper.readValue(cleaned, new TypeReference<List<ExtractedFact>>() {});
         } catch (JsonProcessingException e) {
-            log.warn("Failed to parse extraction JSON — skipping. Response was: '{}'. Error: {}",
-                    cleaned.substring(0, Math.min(200, cleaned.length())), e.getMessage());
+            log.warn("Failed to parse extraction JSON — skipping. Error: {}", e.getMessage());
             return List.of();
         }
     }
@@ -144,7 +171,6 @@ public class MemoryExtractionService {
             if (m.getRole() == Message.Role.system) return;
             if (m.getRole() == Message.Role.tool) return;
             if (m.getContent() == null || m.getContent().isBlank()) return;
-
             String role = m.getRole() == Message.Role.user ? "User" : "Assistant";
             sb.append(role).append(": ").append(m.getContent()).append("\n");
         });

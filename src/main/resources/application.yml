@@ -29,7 +29,7 @@ openai:
 groq:
   api-key: ${GROQ_API_KEY:}
   base-url: https://api.groq.com/openai/v1
-  model: ${GROQ_MODEL:llama3-groq-70b-8192-tool-use-preview}
+  model: ${GROQ_MODEL:llama-3.3-70b-versatile}
   max-tokens: 4096
   temperature: 0.2
 
@@ -95,8 +95,15 @@ resilience4j:
         slow-call-duration-threshold: 30s
         slow-call-rate-threshold: 80
         register-health-indicator: true
-        # AgentException = logic error (bad API key, bad request)
-        # Don't count these as failures for circuit breaker — they won't be fixed by waiting
+        ignore-exceptions:
+          - com.deepansh.agent.exception.AgentException
+      # Separate CB for background memory extraction — failures here
+      # must never affect the main agent circuit breaker state
+      memoryExtraction:
+        sliding-window-size: 5
+        failure-rate-threshold: 80
+        wait-duration-in-open-state: 60s
+        permitted-calls-in-half-open-state: 1
         ignore-exceptions:
           - com.deepansh.agent.exception.AgentException
 
