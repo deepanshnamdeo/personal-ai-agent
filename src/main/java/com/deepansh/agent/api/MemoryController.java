@@ -2,6 +2,7 @@ package com.deepansh.agent.api;
 
 import com.deepansh.agent.memory.AgentMemory;
 import com.deepansh.agent.memory.LongTermMemory;
+import com.deepansh.agent.memory.SemanticMemoryService;
 import com.deepansh.agent.memory.SessionMetadata;
 import com.deepansh.agent.memory.SessionService;
 import com.deepansh.agent.memory.ShortTermMemory;
@@ -14,19 +15,6 @@ import org.springframework.web.bind.annotation.*;
 import java.util.List;
 import java.util.Map;
 
-/**
- * REST API for memory and session management.
- *
- * Endpoints:
- *   GET    /api/v1/memory/{userId}                 — list all long-term memories
- *   GET    /api/v1/memory/{userId}/search?q=       — keyword search memories
- *   GET    /api/v1/memory/{userId}/tag/{tag}        — filter by tag
- *   POST   /api/v1/memory/{userId}                 — manually store a memory
- *   DELETE /api/v1/memory/entry/{memoryId}          — delete a specific memory
- *
- *   GET    /api/v1/memory/{userId}/sessions         — list all sessions for a user
- *   DELETE /api/v1/memory/session/{sessionId}       — clear session from Redis
- */
 @RestController
 @RequestMapping("/api/v1/memory")
 @RequiredArgsConstructor
@@ -36,8 +24,9 @@ public class MemoryController {
     private final LongTermMemory longTermMemory;
     private final ShortTermMemory shortTermMemory;
     private final SessionService sessionService;
+    private final SemanticMemoryService semanticMemoryService;
 
-    // ─── Long-term memory endpoints ──────────────────────────────────────────
+    // ─── Long-term memory ────────────────────────────────────────────────────
 
     @GetMapping("/{userId}")
     public ResponseEntity<List<AgentMemory>> getAllMemories(@PathVariable String userId) {
@@ -47,8 +36,12 @@ public class MemoryController {
     @GetMapping("/{userId}/search")
     public ResponseEntity<List<AgentMemory>> searchMemories(
             @PathVariable String userId,
-            @RequestParam @NotBlank String q) {
-        return ResponseEntity.ok(longTermMemory.search(userId, q));
+            @RequestParam @NotBlank String q,
+            @RequestParam(defaultValue = "semantic") String mode) {
+        List<AgentMemory> results = "semantic".equals(mode)
+                ? longTermMemory.semanticSearch(userId, q)
+                : longTermMemory.search(userId, q);
+        return ResponseEntity.ok(results);
     }
 
     @GetMapping("/{userId}/tag/{tag}")
@@ -62,25 +55,16 @@ public class MemoryController {
     public ResponseEntity<AgentMemory> storeMemory(
             @PathVariable String userId,
             @RequestBody Map<String, String> body) {
-
         String content = body.get("content");
         String tag = body.getOrDefault("tag", "general");
-
-        if (content == null || content.isBlank()) {
-            return ResponseEntity.badRequest().build();
-        }
-
-        AgentMemory saved = longTermMemory.store(userId, content, tag, "manual-api");
-        return ResponseEntity.ok(saved);
+        if (content == null || content.isBlank()) return ResponseEntity.badRequest().build();
+        return ResponseEntity.ok(longTermMemory.store(userId, content, tag, "manual-api"));
     }
 
     @DeleteMapping("/entry/{memoryId}")
     public ResponseEntity<Map<String, String>> deleteMemory(@PathVariable Long memoryId) {
         longTermMemory.delete(memoryId);
-        return ResponseEntity.ok(Map.of(
-                "message", "Memory deleted",
-                "id", String.valueOf(memoryId)
-        ));
+        return ResponseEntity.ok(Map.of("message", "Deleted", "id", String.valueOf(memoryId)));
     }
 
     @GetMapping("/{userId}/count")
@@ -88,7 +72,21 @@ public class MemoryController {
         return ResponseEntity.ok(Map.of("count", longTermMemory.countForUser(userId)));
     }
 
-    // ─── Session endpoints ────────────────────────────────────────────────────
+    /**
+     * Backfill embeddings for all memories without one.
+     * Run once after enabling pgvector on an existing database.
+     * POST /api/v1/memory/{userId}/backfill-embeddings
+     */
+    @PostMapping("/{userId}/backfill-embeddings")
+    public ResponseEntity<Map<String, Object>> backfillEmbeddings(@PathVariable String userId) {
+        int count = semanticMemoryService.backfillEmbeddings(userId);
+        return ResponseEntity.ok(Map.of(
+                "message", "Backfill started asynchronously",
+                "memoriesQueued", count
+        ));
+    }
+
+    // ─── Sessions ────────────────────────────────────────────────────────────
 
     @GetMapping("/{userId}/sessions")
     public ResponseEntity<List<SessionMetadata>> getSessions(@PathVariable String userId) {
@@ -98,9 +96,6 @@ public class MemoryController {
     @DeleteMapping("/session/{sessionId}")
     public ResponseEntity<Map<String, String>> clearSession(@PathVariable String sessionId) {
         shortTermMemory.clear(sessionId);
-        return ResponseEntity.ok(Map.of(
-                "message", "Session cleared from Redis",
-                "sessionId", sessionId
-        ));
+        return ResponseEntity.ok(Map.of("message", "Session cleared", "sessionId", sessionId));
     }
 }

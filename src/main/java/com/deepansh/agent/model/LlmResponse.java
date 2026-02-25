@@ -14,4 +14,11 @@ public class LlmResponse {
     private ToolCall toolCall;
 
     private boolean isToolCall;
+
+    // Token usage — populated from OpenAI usage block
+    @Builder.Default
+    private int promptTokens = 0;
+
+    @Builder.Default
+    private int completionTokens = 0;
 }

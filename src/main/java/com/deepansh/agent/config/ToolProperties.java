@@ -70,4 +70,21 @@ public class ToolProperties {
                     .toList();
         }
     }
+
+    private FileOps fileOps = new FileOps();
+
+    @Data
+    public static class FileOps {
+        private String baseDirectory = "./agent-files";
+        private int maxFileSizeKb = 512;
+        private String allowedExtensions = "txt,md,json,csv,yaml,yml,log";
+
+        public List<String> getAllowedExtensionList() {
+            return Arrays.stream(allowedExtensions.split(","))
+                    .map(String::trim)
+                    .filter(s -> !s.isBlank())
+                    .toList();
+        }
+    }
+
 }

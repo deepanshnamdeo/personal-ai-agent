@@ -12,17 +12,14 @@ import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
- * Allows the agent to search its own long-term memory during a run.
+ * Agent tool to search long-term memory.
  *
- * The agent uses this to answer questions like:
- * - "What's my preferred format for summaries?"
- * - "What projects am I working on?"
- * - "What do you know about me?"
- *
- * Search modes:
- * - keyword: ILIKE search across all memories (V1 — good enough for small sets)
- * - tag: filter by category (fact / preference / task / context)
- * - all: return everything (used when user asks "what do you know about me?")
+ * Modes:
+ * - semantic: pgvector cosine similarity — finds conceptually related memories
+ *             even when phrasing differs. Best default for open-ended queries.
+ * - keyword:  ILIKE substring match — use for exact term lookups
+ * - tag:      filter by category (fact/preference/task/context)
+ * - all:      return everything ("what do you know about me?")
  */
 @Component
 @Slf4j
@@ -39,10 +36,10 @@ public class SearchMemoryTool implements AgentTool {
     @Override
     public String getDescription() {
         return """
-                Search your long-term memory about the user. Use this to recall stored facts,
-                preferences, ongoing tasks, or context from past conversations.
-                Use mode 'keyword' to find specific memories, 'tag' to filter by category,
-                or 'all' to retrieve everything you remember about the user.
+                Search your long-term memory about the user.
+                Use mode 'semantic' (default) for natural language queries — finds related memories
+                even when phrasing is different. Use 'keyword' for exact term matching.
+                Use 'tag' to filter by category. Use 'all' to retrieve everything.
                 """;
     }
 
@@ -57,12 +54,14 @@ public class SearchMemoryTool implements AgentTool {
                         ),
                         "mode", Map.of(
                                 "type", "string",
-                                "enum", List.of("keyword", "tag", "all"),
-                                "description", "Search mode: 'keyword' for text search, 'tag' for category filter, 'all' for everything"
+                                "enum", List.of("semantic", "keyword", "tag", "all"),
+                                "description", "Search mode. 'semantic' uses AI similarity (best for most queries). " +
+                                               "'keyword' for exact terms. 'tag' for category filter. 'all' for everything."
                         ),
                         "query", Map.of(
                                 "type", "string",
-                                "description", "Search keyword (for mode=keyword) or tag name (for mode=tag): fact | preference | task | context"
+                                "description", "Query string for semantic/keyword search, or tag name for tag mode " +
+                                               "(fact | preference | task | context)"
                         )
                 ),
                 "required", List.of("userId", "mode")
@@ -72,7 +71,7 @@ public class SearchMemoryTool implements AgentTool {
     @Override
     public String execute(Map<String, Object> arguments) {
         String userId = (String) arguments.get("userId");
-        String mode   = (String) arguments.get("mode");
+        String mode   = (String) arguments.getOrDefault("mode", "semantic");
         String query  = (String) arguments.getOrDefault("query", "");
 
         if (userId == null || userId.isBlank()) {
@@ -81,6 +80,10 @@ public class SearchMemoryTool implements AgentTool {
 
         try {
             List<AgentMemory> results = switch (mode) {
+                case "semantic" -> {
+                    if (query.isBlank()) yield longTermMemory.loadAll(userId);
+                    yield longTermMemory.semanticSearch(userId, query);
+                }
                 case "keyword" -> {
                     if (query.isBlank()) yield List.of();
                     yield longTermMemory.search(userId, query);

@@ -14,7 +14,6 @@ import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -87,11 +86,9 @@ public class OpenAiClient implements LlmClient {
         m.put("role", msg.getRole().name());
 
         if (msg.getRole() == Message.Role.tool) {
-            // Tool result message — must include tool_call_id so OpenAI links it back
             m.put("tool_call_id", msg.getToolCallId());
             m.put("content", msg.getContent());
         } else if (msg.getRole() == Message.Role.assistant && msg.getContent() == null) {
-            // Assistant message that triggered a tool call — content may be null
             m.put("content", "");
         } else {
             m.put("content", msg.getContent() != null ? msg.getContent() : "");
@@ -107,6 +104,16 @@ public class OpenAiClient implements LlmClient {
             throw new AgentException("OpenAI returned no choices in response");
         }
 
+        // Parse token usage
+        int promptTokens = 0, completionTokens = 0;
+        Map<String, Object> usage = (Map<String, Object>) response.get("usage");
+        if (usage != null) {
+            promptTokens    = ((Number) usage.getOrDefault("prompt_tokens", 0)).intValue();
+            completionTokens = ((Number) usage.getOrDefault("completion_tokens", 0)).intValue();
+            log.debug("Token usage — prompt={} completion={} total={}",
+                    promptTokens, completionTokens, promptTokens + completionTokens);
+        }
+
         Map<String, Object> choice = choices.get(0);
         Map<String, Object> message = (Map<String, Object>) choice.get("message");
         String finishReason = (String) choice.get("finish_reason");
@@ -115,21 +122,21 @@ public class OpenAiClient implements LlmClient {
 
         if ("tool_calls".equals(finishReason)) {
             List<Map<String, Object>> toolCalls = (List<Map<String, Object>>) message.get("tool_calls");
-            // We handle one tool call per iteration (sequential execution)
-            Map<String, Object> first = toolCalls.get(0);
+            Map<String, Object> first    = toolCalls.get(0);
             Map<String, Object> function = (Map<String, Object>) first.get("function");
 
             Map<String, Object> args;
             try {
                 args = objectMapper.readValue(
-                        (String) function.get("arguments"),
-                        new TypeReference<>() {});
+                        (String) function.get("arguments"), new TypeReference<>() {});
             } catch (JsonProcessingException e) {
                 throw new AgentException("Failed to parse tool arguments from OpenAI response", e);
             }
 
             return LlmResponse.builder()
                     .isToolCall(true)
+                    .promptTokens(promptTokens)
+                    .completionTokens(completionTokens)
                     .toolCall(ToolCall.builder()
                             .id((String) first.get("id"))
                             .toolName((String) function.get("name"))
@@ -138,10 +145,11 @@ public class OpenAiClient implements LlmClient {
                     .build();
         }
 
-        // Final text answer
         return LlmResponse.builder()
                 .isToolCall(false)
                 .content((String) message.get("content"))
+                .promptTokens(promptTokens)
+                .completionTokens(completionTokens)
                 .build();
     }
 }
