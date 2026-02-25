@@ -167,9 +167,13 @@ public class AgentLoop {
             runCtx.recordToolCall(toolCall.getToolName(), toolCall.getArguments(),
                     toolLatency, observation);
 
+            // IMPORTANT: The assistant message MUST include tool_calls per the OpenAI spec.
+            // Without it, the LLM receives a malformed conversation on the next iteration
+            // and re-generates broken tool calls instead of processing the tool result.
             context.getMessages().add(Message.builder()
                     .role(Message.Role.assistant)
                     .content(null)
+                    .toolCalls(List.of(toolCall))
                     .build());
 
             context.getMessages().add(Message.builder()
@@ -202,9 +206,12 @@ public class AgentLoop {
                 3. Provide a clear, concise final answer
 
                 Rules:
-                - Never make up information — use tools to find it
-                - If a tool fails, try an alternative or explain the limitation
-                - Be concise and actionable
+                - For well-known facts (country capitals, historical dates, famous people, geography, etc.) \
+                answer directly from your training knowledge — do NOT use web_search for these.
+                - Use web_search only for current events, live data, or information that may have changed recently.
+                - If a tool returns an ERROR, do NOT call the same tool again. \
+                Instead, answer from your own knowledge or clearly explain the limitation.
+                - Be concise and actionable.
                 """
                 + (ltm.isEmpty() ? "" : "\n" + ltm);
 

@@ -37,10 +37,13 @@ import java.util.regex.Pattern;
 @Slf4j
 public class GenericLlmClient implements LlmClient {
 
-    // Matches Groq's broken XML tool call format:
-    // <function=tool_name({"arg": "value"})</function>  OR  <function=tool_name({"arg": "value"})>
+    // Matches BOTH broken XML formats Groq emits:
+    // Format 1 (with parens):    <function=web_search({"arg": "val"})</function>
+    // Format 2 (without parens): <function=web_search{"arg": "val"}></function>
+    // The key difference: parens around the JSON object are made optional via \(? and \)?
+    // and the JSON body is anchored to { ... } so both variants are captured in group 2.
     private static final Pattern GROQ_XML_TOOL_PATTERN =
-            Pattern.compile("<function=(\\w+)\\((.+?)\\)(?:</function>|>)", Pattern.DOTALL);
+            Pattern.compile("<function=(\\w+)\\(?(\\{.+?\\})\\)?(?:</function>|>)", Pattern.DOTALL);
 
     private final LlmProviderProperties props;
     private final ObjectMapper objectMapper;
@@ -213,8 +216,30 @@ public class GenericLlmClient implements LlmClient {
         if (msg.getRole() == Message.Role.tool) {
             m.put("tool_call_id", msg.getToolCallId());
             m.put("content", msg.getContent());
-        } else if (msg.getRole() == Message.Role.assistant && msg.getContent() == null) {
-            m.put("content", "");
+        } else if (msg.getRole() == Message.Role.assistant) {
+            // Per the OpenAI spec, an assistant message that made tool calls must include
+            // the tool_calls array. Without it the LLM cannot correlate tool results to its
+            // original requests and will generate malformed follow-up calls.
+            m.put("content", msg.getContent()); // null is valid here per spec
+            if (msg.getToolCalls() != null && !msg.getToolCalls().isEmpty()) {
+                m.put("tool_calls", msg.getToolCalls().stream()
+                        .map(tc -> {
+                            Map<String, Object> tcMap = new HashMap<>();
+                            tcMap.put("id", tc.getId());
+                            tcMap.put("type", "function");
+
+                            Map<String, Object> fn = new HashMap<>();
+                            fn.put("name", tc.getToolName());
+                            try {
+                                fn.put("arguments", objectMapper.writeValueAsString(tc.getArguments()));
+                            } catch (JsonProcessingException e) {
+                                fn.put("arguments", "{}");
+                            }
+                            tcMap.put("function", fn);
+                            return tcMap;
+                        })
+                        .toList());
+            }
         } else {
             m.put("content", msg.getContent() != null ? msg.getContent() : "");
         }
