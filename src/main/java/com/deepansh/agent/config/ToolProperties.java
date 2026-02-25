@@ -49,21 +49,21 @@ public class ToolProperties {
 
     @Data
     public static class Database {
-        private String readableTables = "agent_memories,agent_sessions";
-        private String writableTables = "";
-        private int maxResultRows = 100;
+        private String readableCollections = "agent_memories,agent_sessions";
+        private String writableCollections = "";
+        private int maxResultDocs = 100;
 
-        public List<String> getReadableTableList() {
-            if (readableTables == null || readableTables.isBlank()) return List.of();
-            return Arrays.stream(readableTables.split(","))
+        public List<String> getReadableCollectionList() {
+            if (readableCollections == null || readableCollections.isBlank()) return List.of();
+            return Arrays.stream(readableCollections.split(","))
                     .map(String::trim)
                     .filter(s -> !s.isBlank())
                     .toList();
         }
 
-        public List<String> getWritableTableList() {
-            if (writableTables == null || writableTables.isBlank()) return List.of();
-            return Arrays.stream(writableTables.split(","))
+        public List<String> getWritableCollectionList() {
+            if (writableCollections == null || writableCollections.isBlank()) return List.of();
+            return Arrays.stream(writableCollections.split(","))
                     .map(String::trim)
                     .filter(s -> !s.isBlank())
                     .toList();

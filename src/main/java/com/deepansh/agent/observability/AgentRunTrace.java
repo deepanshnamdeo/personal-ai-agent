@@ -1,26 +1,34 @@
 package com.deepansh.agent.observability;
 
-import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.JdbcTypeCode;
-import org.hibernate.type.SqlTypes;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.mongodb.core.index.CompoundIndex;
+import org.springframework.data.mongodb.core.index.CompoundIndexes;
+import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
+import java.util.List;
+import java.util.Map;
 
-@Entity
-@Table(
-    name = "agent_run_traces",
-    indexes = {
-        @Index(name = "idx_trace_session",    columnList = "session_id"),
-        @Index(name = "idx_trace_user",       columnList = "user_id"),
-        @Index(name = "idx_trace_created_at", columnList = "created_at"),
-        @Index(name = "idx_trace_status",     columnList = "status")
-    }
-)
+/**
+ * Agent run trace document.
+ * Collection: agent_run_traces
+ *
+ * MongoDB advantage: toolCallsJson was a jsonb string in PostgreSQL.
+ * Here toolCalls is a native List<Map> — stored as BSON array,
+ * fully queryable with MongoDB's dot-notation and $elemMatch.
+ *
+ * E.g: db.agent_run_traces.find({"toolCalls.toolName": "web_search"})
+ */
+@Document(collection = "agent_run_traces")
+@CompoundIndexes({
+    @CompoundIndex(name = "idx_trace_user_date", def = "{'userId': 1, 'createdAt': -1}")
+})
 @Data
 @Builder
 @NoArgsConstructor
@@ -30,48 +38,33 @@ public class AgentRunTrace {
     public enum Status { SUCCESS, MAX_ITERATIONS, ERROR }
 
     @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+    private String id;
 
-    @Column(name = "session_id", nullable = false)
+    @Indexed
     private String sessionId;
 
-    @Column(name = "user_id", nullable = false)
+    @Indexed
     private String userId;
 
-    @Column(name = "user_input", nullable = false, length = 4000)
     private String userInput;
-
-    @Column(name = "final_answer", length = 8000)
     private String finalAnswer;
-
-    @Enumerated(EnumType.STRING)
-    @Column(nullable = false)
     private Status status;
-
-    @Column(name = "iterations_used")
     private int iterationsUsed;
-
-    @Column(name = "total_latency_ms")
     private long totalLatencyMs;
 
-    @Column(name = "prompt_tokens")
+    // Token usage
     private int promptTokens;
-
-    @Column(name = "completion_tokens")
     private int completionTokens;
-
-    @Column(name = "total_tokens")
     private int totalTokens;
 
-    @JdbcTypeCode(SqlTypes.JSON)
-    @Column(name = "tool_calls_json", columnDefinition = "jsonb")
-    private String toolCallsJson;
+    /**
+     * Native BSON array — no JSON serialization needed.
+     * Each entry: {toolName, latencyMs, resultPreview}
+     */
+    private List<Map<String, Object>> toolCalls;
 
-    @Column(name = "error_message", length = 2000)
     private String errorMessage;
 
-    @CreationTimestamp
-    @Column(name = "created_at", updatable = false)
+    @CreatedDate
     private Instant createdAt;
 }

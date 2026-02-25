@@ -2,16 +2,19 @@ package com.deepansh.agent.memory;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.data.mongodb.core.MongoTemplate;
+import org.springframework.data.mongodb.core.query.Criteria;
+import org.springframework.data.mongodb.core.query.Query;
+import org.springframework.data.mongodb.core.query.Update;
 import org.springframework.stereotype.Service;
-import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
 
 /**
- * Manages session lifecycle — creation, turn tracking, and listing.
+ * Session lifecycle management backed by MongoDB.
  *
- * Separating session concerns from memory concerns keeps both services
- * focused and testable independently.
+ * Uses MongoTemplate for the upsert (findAndModify with upsert=true)
+ * which is more natural in MongoDB than JPA's merge semantics.
  */
 @Service
 @Slf4j
@@ -19,39 +22,32 @@ import java.util.List;
 public class SessionService {
 
     private final SessionMetadataRepository sessionRepo;
+    private final MongoTemplate mongoTemplate;
 
-    /**
-     * Called at the start of each agent run.
-     * Creates the session entry if new, increments turn count if existing.
-     */
-    @Transactional
     public SessionMetadata upsertSession(String sessionId, String userId) {
+        Query query = new Query(Criteria.where("_id").is(sessionId));
+        Update update = new Update()
+                .setOnInsert("userId", userId)
+                .setOnInsert("turnCount", 0)
+                .inc("turnCount", 1);
+
+        mongoTemplate.upsert(query, update, SessionMetadata.class);
+
         return sessionRepo.findById(sessionId)
-                .map(existing -> {
-                    existing.setTurnCount(existing.getTurnCount() + 1);
-                    return sessionRepo.save(existing);
-                })
                 .orElseGet(() -> {
-                    SessionMetadata newSession = SessionMetadata.builder()
+                    log.warn("Session not found after upsert: {}", sessionId);
+                    return SessionMetadata.builder()
                             .sessionId(sessionId)
                             .userId(userId)
                             .turnCount(1)
                             .build();
-                    log.info("New session created [sessionId={}, userId={}]", sessionId, userId);
-                    return sessionRepo.save(newSession);
                 });
     }
 
-    /**
-     * Store a summary for the session (generated post-run by LLM if desired).
-     */
-    @Transactional
     public void updateSummary(String sessionId, String summary) {
-        sessionRepo.findById(sessionId).ifPresent(session -> {
-            session.setSummary(summary);
-            sessionRepo.save(session);
-            log.debug("Updated summary for session={}", sessionId);
-        });
+        Query query = new Query(Criteria.where("_id").is(sessionId));
+        Update update = new Update().set("summary", summary);
+        mongoTemplate.updateFirst(query, update, SessionMetadata.class);
     }
 
     public List<SessionMetadata> getSessionsForUser(String userId) {

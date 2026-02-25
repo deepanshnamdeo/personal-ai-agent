@@ -1,23 +1,22 @@
 package com.deepansh.agent.memory;
 
-import jakarta.persistence.*;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
 import lombok.Data;
 import lombok.NoArgsConstructor;
-import org.hibernate.annotations.CreationTimestamp;
-import org.hibernate.annotations.UpdateTimestamp;
+import org.springframework.data.annotation.CreatedDate;
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.LastModifiedDate;
+import org.springframework.data.mongodb.core.index.Indexed;
+import org.springframework.data.mongodb.core.mapping.Document;
 
 import java.time.Instant;
 
-@Entity
-@Table(
-    name = "agent_sessions",
-    indexes = {
-        @Index(name = "idx_session_user_id",    columnList = "user_id"),
-        @Index(name = "idx_session_updated_at", columnList = "updated_at")
-    }
-)
+/**
+ * Session metadata document.
+ * Collection: agent_sessions
+ */
+@Document(collection = "agent_sessions")
 @Data
 @Builder
 @NoArgsConstructor
@@ -27,21 +26,17 @@ public class SessionMetadata {
     @Id
     private String sessionId;
 
-    @Column(name = "user_id", nullable = false)
+    @Indexed
     private String userId;
 
     @Builder.Default
-    @Column(name = "turn_count")
     private int turnCount = 0;
 
-    @Column(length = 1000)
     private String summary;
 
-    @CreationTimestamp
-    @Column(name = "created_at", updatable = false)
+    @CreatedDate
     private Instant createdAt;
 
-    @UpdateTimestamp
-    @Column(name = "updated_at")
+    @LastModifiedDate
     private Instant updatedAt;
 }

@@ -62,7 +62,7 @@ public class MemoryController {
     }
 
     @DeleteMapping("/entry/{memoryId}")
-    public ResponseEntity<Map<String, String>> deleteMemory(@PathVariable Long memoryId) {
+    public ResponseEntity<Map<String, String>> deleteMemory(@PathVariable String memoryId) {
         longTermMemory.delete(memoryId);
         return ResponseEntity.ok(Map.of("message", "Deleted", "id", String.valueOf(memoryId)));
     }

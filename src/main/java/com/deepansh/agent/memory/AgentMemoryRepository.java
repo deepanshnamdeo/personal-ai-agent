@@ -1,14 +1,13 @@
 package com.deepansh.agent.memory;
 
-import org.springframework.data.jpa.repository.JpaRepository;
-import org.springframework.data.jpa.repository.Query;
-import org.springframework.data.repository.query.Param;
+import org.springframework.data.mongodb.repository.MongoRepository;
+import org.springframework.data.mongodb.repository.Query;
 import org.springframework.stereotype.Repository;
 
 import java.util.List;
 
 @Repository
-public interface AgentMemoryRepository extends JpaRepository<AgentMemory, Long> {
+public interface AgentMemoryRepository extends MongoRepository<AgentMemory, String> {
 
     List<AgentMemory> findByUserIdOrderByCreatedAtDesc(String userId);
 
@@ -17,18 +16,20 @@ public interface AgentMemoryRepository extends JpaRepository<AgentMemory, Long> 
     long countByUserId(String userId);
 
     /**
-     * Keyword search across memory content for a given user.
-     * Simple ILIKE-based search — good enough before adding pgvector.
+     * Case-insensitive regex search across content field.
+     * MongoDB equivalent of ILIKE '%keyword%'.
      */
-    @Query("SELECT m FROM AgentMemory m WHERE m.userId = :userId " +
-           "AND LOWER(m.content) LIKE LOWER(CONCAT('%', :keyword, '%')) " +
-           "ORDER BY m.createdAt DESC")
-    List<AgentMemory> searchByKeyword(@Param("userId") String userId,
-                                      @Param("keyword") String keyword);
+    @Query("{ 'userId': ?0, 'content': { $regex: ?1, $options: 'i' } }")
+    List<AgentMemory> searchByKeyword(String userId, String keyword);
 
     /**
-     * Used to enforce the per-user memory cap — deletes oldest entries first.
+     * Oldest-first — used for cap enforcement eviction.
      */
-    @Query("SELECT m FROM AgentMemory m WHERE m.userId = :userId ORDER BY m.createdAt ASC")
-    List<AgentMemory> findOldestByUserId(@Param("userId") String userId);
+    List<AgentMemory> findByUserIdOrderByCreatedAtAsc(String userId);
+
+    /**
+     * Find memories that have an embedding (for semantic search filtering).
+     */
+    @Query("{ 'userId': ?0, 'embedding': { $exists: true, $ne: null } }")
+    List<AgentMemory> findByUserIdWithEmbedding(String userId);
 }

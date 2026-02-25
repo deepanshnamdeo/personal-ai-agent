@@ -119,3 +119,49 @@ export TOOL_ALLOWED_DOMAINS=api.github.com,api.notion.com,api.weather.com
 export DB_READABLE_TABLES=agent_memories,agent_sessions,your_table
 export DB_WRITABLE_TABLES=notes,tasks
 ```
+
+## Database Migration: PostgreSQL → MongoDB
+
+The project now uses **MongoDB** instead of PostgreSQL.
+
+### Collections
+
+| Collection | Purpose |
+|------------|---------|
+| `agent_memories` | Long-term memory facts (with embedding vector) |
+| `agent_sessions` | Session metadata and turn counts |
+| `agent_run_traces` | Full observability traces per agent run |
+
+### Start MongoDB locally
+
+```bash
+# Community MongoDB
+docker run -d --name mongodb -p 27017:27017 mongo:7
+
+# Or with authentication
+docker run -d --name mongodb \
+  -e MONGO_INITDB_ROOT_USERNAME=admin \
+  -e MONGO_INITDB_ROOT_PASSWORD=password \
+  -p 27017:27017 mongo:7
+
+export MONGODB_URI=mongodb://admin:password@localhost:27017/agent_db?authSource=admin
+```
+
+### Atlas Vector Search (for production semantic memory)
+
+1. Deploy to MongoDB Atlas (free tier available)
+2. Set `MONGODB_URI` to your Atlas connection string
+3. Create a Vector Search index on `agent_memories`:
+   ```json
+   {
+     "fields": [{
+       "type": "vector",
+       "path": "embedding",
+       "numDimensions": 1536,
+       "similarity": "cosine"
+     }]
+   }
+   ```
+4. Uncomment the `$vectorSearch` aggregation in `SemanticMemoryService`
+
+For local/community MongoDB, in-process cosine similarity is used automatically.

@@ -2,22 +2,11 @@ spring:
   application:
     name: personal-ai-agent
 
-  datasource:
-    url: jdbc:postgresql://localhost:5432/agent_db
-    username: ${DB_USERNAME:postgres}
-    password: ${DB_PASSWORD:postgres}
-    driver-class-name: org.postgresql.Driver
-
-  jpa:
-    hibernate:
-      ddl-auto: update
-    show-sql: false
-    properties:
-      hibernate:
-        dialect: org.hibernate.dialect.PostgreSQLDialect
-        format_sql: true
-
   data:
+    mongodb:
+      uri: ${MONGODB_URI:mongodb://localhost:27017/agent_db}
+      auto-index-creation: true
+
     redis:
       host: ${REDIS_HOST:localhost}
       port: ${REDIS_PORT:6379}
@@ -51,9 +40,11 @@ tools:
     read-timeout-ms: 10000
     allowed-domains: ${TOOL_ALLOWED_DOMAINS:}
   database:
-    readable-tables: ${DB_READABLE_TABLES:agent_memories,agent_sessions}
-    writable-tables: ${DB_WRITABLE_TABLES:}
-    max-result-rows: 100
+    # Collections the agent can query (empty = deny all)
+    readable-collections: ${DB_READABLE_COLLECTIONS:agent_memories,agent_sessions}
+    # Collections the agent can insert/update into (empty = deny all)
+    writable-collections: ${DB_WRITABLE_COLLECTIONS:}
+    max-result-docs: 100
   file-ops:
     base-directory: ${AGENT_FILES_DIR:./agent-files}
     max-file-size-kb: 512

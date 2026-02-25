@@ -2,58 +2,53 @@ package com.deepansh.agent.tool.impl;
 
 import com.deepansh.agent.config.ToolProperties;
 import com.deepansh.agent.tool.AgentTool;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.bson.Document;
+import org.springframework.data.mongodb.core.MongoTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /**
- * Allows the agent to query and write to the PostgreSQL database.
+ * MongoDB query tool — lets the agent query and write to collections.
  *
- * Security model — layered defense:
- * 1. Table allowlists: readable-tables / writable-tables in application.yml
- *    The agent can ONLY touch tables you explicitly permit.
- * 2. Statement type enforcement: SELECT-only tables cannot be mutated.
- * 3. SQL injection prevention: JdbcTemplate parameterized queries.
- *    The agent passes the full SQL but we validate it before execution.
- * 4. Row cap: SELECT results truncated at max-result-rows (default 100)
- *    to prevent context window explosion.
- * 5. No DDL ever: CREATE/DROP/ALTER/TRUNCATE are blocked unconditionally.
+ * Operations:
+ * - find:         query documents with a filter (JSON object)
+ * - insertOne:    insert a single document
+ * - updateMany:   update documents matching a filter
+ * - countDocuments: count matching documents
  *
- * Production note: For a multi-user or team agent, add a read-only
- * datasource (DataSource readOnlyDs) and route SELECT queries there.
- * For a personal agent, the single datasource is fine.
+ * Security model:
+ * - Collection allowlists: readable-collections / writable-collections
+ * - Result cap: max-result-docs (default 100)
+ * - No drop/delete-collection/drop-database commands
+ * - Filter and document are parsed from JSON strings
+ *
+ * The agent provides queries as JSON strings:
+ *   filter: '{"userId": "deepansh", "tag": "preference"}'
+ *   document: '{"content": "prefers bullet points", "tag": "preference"}'
  */
 @Component
 @Slf4j
 public class DatabaseQueryTool implements AgentTool {
 
-    // Blocked statement prefixes — checked case-insensitively
-    private static final List<String> BLOCKED_PREFIXES =
-            List.of("DROP", "CREATE", "ALTER", "TRUNCATE", "GRANT", "REVOKE",
-                    "EXECUTE", "EXEC", "CALL", "--", "/*");
+    private static final List<String> BLOCKED_OPERATIONS =
+            List.of("drop", "dropDatabase", "dropCollection", "deleteMany", "deleteOne",
+                    "bulkWrite", "createIndex", "runCommand");
 
-    // Extracts the first word (statement type) and first table name from SQL
-    // Matches: SELECT ... FROM table, INSERT INTO table, UPDATE table
-    private static final Pattern SELECT_INSERT_PATTERN =
-            Pattern.compile("^\\s*(SELECT|INSERT)\\s+.*?(?:FROM|INTO)\\s+(\\w+)",
-                    Pattern.CASE_INSENSITIVE | Pattern.DOTALL);
-
-    private static final Pattern UPDATE_PATTERN =
-            Pattern.compile("^\\s*(UPDATE)\\s+(\\w+)",
-                    Pattern.CASE_INSENSITIVE);
-
-    private final JdbcTemplate jdbcTemplate;
+    private final MongoTemplate mongoTemplate;
     private final ToolProperties toolProperties;
+    private final ObjectMapper objectMapper;
 
-    public DatabaseQueryTool(JdbcTemplate jdbcTemplate, ToolProperties toolProperties) {
-        this.jdbcTemplate = jdbcTemplate;
+    public DatabaseQueryTool(MongoTemplate mongoTemplate,
+                              ToolProperties toolProperties,
+                              ObjectMapper objectMapper) {
+        this.mongoTemplate = mongoTemplate;
         this.toolProperties = toolProperties;
+        this.objectMapper = objectMapper;
     }
 
     @Override
@@ -64,10 +59,11 @@ public class DatabaseQueryTool implements AgentTool {
     @Override
     public String getDescription() {
         return """
-                Query or write to the PostgreSQL database.
-                Use 'SELECT' to read data, 'INSERT' or 'UPDATE' to write data.
-                Only permitted tables can be accessed. Results are returned as a formatted table.
-                Use this to look up stored memories, session history, or any other persisted data.
+                Query or write to the MongoDB database.
+                Operations: find (query documents), insertOne (add document),
+                updateMany (modify documents), countDocuments (count matching docs).
+                Filters and documents are provided as JSON strings.
+                Only permitted collections can be accessed.
                 """;
     }
 
@@ -76,184 +72,149 @@ public class DatabaseQueryTool implements AgentTool {
         return Map.of(
                 "type", "object",
                 "properties", Map.of(
-                        "sql", Map.of(
+                        "operation", Map.of(
                                 "type", "string",
-                                "description", "The SQL statement to execute. Use standard PostgreSQL syntax. " +
-                                               "E.g: 'SELECT content, tag FROM agent_memories WHERE user_id = ''deepansh'' ORDER BY created_at DESC LIMIT 10'"
+                                "enum", List.of("find", "insertOne", "updateMany", "countDocuments"),
+                                "description", "The MongoDB operation to execute"
                         ),
-                        "params", Map.of(
-                                "type", "array",
-                                "items", Map.of("type", "string"),
-                                "description", "Optional list of positional parameters for the query (? placeholders). Prefer these over string interpolation."
+                        "collection", Map.of(
+                                "type", "string",
+                                "description", "The collection name. E.g: 'agent_memories', 'agent_sessions'"
+                        ),
+                        "filter", Map.of(
+                                "type", "string",
+                                "description", "JSON filter document. E.g: '{\"userId\": \"deepansh\", \"tag\": \"preference\"}'. Use '{}' for no filter."
+                        ),
+                        "document", Map.of(
+                                "type", "string",
+                                "description", "JSON document for insertOne, or update spec for updateMany. E.g: '{\"$set\": {\"tag\": \"fact\"}}'"
+                        ),
+                        "limit", Map.of(
+                                "type", "integer",
+                                "description", "Max documents to return for find (default: 20, max: 100)"
                         )
                 ),
-                "required", List.of("sql")
+                "required", List.of("operation", "collection")
         );
     }
 
     @Override
     public String execute(Map<String, Object> arguments) {
-        String sql = (String) arguments.get("sql");
-        if (sql == null || sql.isBlank()) {
-            return "ERROR: 'sql' is required";
+        String operation  = (String) arguments.get("operation");
+        String collection = (String) arguments.get("collection");
+
+        if (operation == null || operation.isBlank())
+            return "ERROR: 'operation' is required";
+        if (collection == null || collection.isBlank())
+            return "ERROR: 'collection' is required";
+
+        log.info("DB tool: operation={} collection={}", operation, collection);
+
+        // Block dangerous operations — checked before switch to guarantee the error message
+        if (BLOCKED_OPERATIONS.stream().anyMatch(b -> b.equalsIgnoreCase(operation))) {
+            return "ERROR: Operation '" + operation + "' is not permitted.";
         }
-
-        sql = sql.trim();
-
-        // Layer 1: Block dangerous statement types
-        String blockError = checkBlockedStatements(sql);
-        if (blockError != null) return blockError;
-
-        // Layer 2: Determine operation type and target table
-        StatementInfo info = parseStatement(sql);
-        if (info == null) {
-            return "ERROR: Could not parse SQL statement. Ensure it starts with SELECT, INSERT, or UPDATE " +
-                   "and references a table with FROM/INTO/UPDATE clause.";
-        }
-
-        // Layer 3: Table allowlist enforcement
-        String allowlistError = checkTableAllowlist(info);
-        if (allowlistError != null) return allowlistError;
-
-        // Layer 4: Execute with JdbcTemplate (parameterized, injection-safe)
-        Object[] params = resolveParams(arguments);
-
-        log.info("DB tool executing [type={}, table={}]", info.statementType(), info.tableName());
 
         try {
-            return switch (info.statementType().toUpperCase()) {
-                case "SELECT" -> executeSelect(sql, params);
-                case "INSERT", "UPDATE" -> executeWrite(sql, params);
-                default -> "ERROR: Only SELECT, INSERT, UPDATE are supported.";
+            return switch (operation.toLowerCase()) {
+                case "find"            -> executeFind(collection, arguments);
+                case "insertone"       -> executeInsert(collection, arguments);
+                case "updatemany"      -> executeUpdate(collection, arguments);
+                case "countdocuments"  -> executeCount(collection, arguments);
+                default -> "ERROR: Unknown operation. Use: find, insertOne, updateMany, countDocuments";
             };
         } catch (Exception e) {
-            log.error("DB query failed: {}", sql, e);
-            return "ERROR: Query execution failed — " + e.getMessage();
+            log.error("DB tool failed: operation={} collection={}", operation, collection, e);
+            return "ERROR: " + e.getMessage();
         }
     }
 
-    private String executeSelect(String sql, Object[] params) {
-        int maxRows = toolProperties.getDatabase().getMaxResultRows();
+    private String executeFind(String collection, Map<String, Object> args) throws Exception {
+        checkReadable(collection);
 
-        // Append LIMIT if not already present
-        String limitedSql = sql.toLowerCase().contains("limit") ? sql
-                : sql + " LIMIT " + maxRows;
+        int maxDocs = toolProperties.getDatabase().getMaxResultDocs();
+        int limit = resolveLimit(args.get("limit"), maxDocs);
 
-        List<Map<String, Object>> rows = params.length > 0
-                ? jdbcTemplate.queryForList(limitedSql, params)
-                : jdbcTemplate.queryForList(limitedSql);
+        Document filter = parseFilter(args);
 
-        if (rows.isEmpty()) {
-            return "Query returned 0 rows.";
+        List<Document> results = mongoTemplate.getDb()
+                .getCollection(collection)
+                .find(filter)
+                .limit(limit)
+                .into(new java.util.ArrayList<>());
+
+        if (results.isEmpty()) return "No documents found in '" + collection + "' matching filter.";
+
+        String json = objectMapper.writerWithDefaultPrettyPrinter()
+                .writeValueAsString(results.stream()
+                        .map(d -> objectMapper.convertValue(d, Map.class))
+                        .collect(Collectors.toList()));
+
+        return String.format("Found %d document(s) in '%s':\n\n%s", results.size(), collection, json);
+    }
+
+    private String executeInsert(String collection, Map<String, Object> args) throws Exception {
+        checkWritable(collection);
+
+        String docJson = (String) args.get("document");
+        if (docJson == null || docJson.isBlank())
+            return "ERROR: 'document' is required for insertOne";
+
+        Document doc = Document.parse(docJson);
+        mongoTemplate.getDb().getCollection(collection).insertOne(doc);
+
+        return "Inserted document into '" + collection + "' with id: " + doc.getObjectId("_id");
+    }
+
+    private String executeUpdate(String collection, Map<String, Object> args) throws Exception {
+        checkWritable(collection);
+
+        Document filter = parseFilter(args);
+        String updateJson = (String) args.get("document");
+        if (updateJson == null || updateJson.isBlank())
+            return "ERROR: 'document' (update spec) is required for updateMany";
+
+        Document update = Document.parse(updateJson);
+        var result = mongoTemplate.getDb().getCollection(collection).updateMany(filter, update);
+
+        return String.format("Updated %d document(s) in '%s' (matched: %d)",
+                result.getModifiedCount(), collection, result.getMatchedCount());
+    }
+
+    private String executeCount(String collection, Map<String, Object> args) throws Exception {
+        checkReadable(collection);
+        Document filter = parseFilter(args);
+        long count = mongoTemplate.getDb().getCollection(collection).countDocuments(filter);
+        return String.format("Count in '%s' matching filter: %d", collection, count);
+    }
+
+    private void checkReadable(String collection) {
+        List<String> readable = toolProperties.getDatabase().getReadableCollectionList();
+        if (!readable.isEmpty() && !readable.contains(collection)) {
+            throw new SecurityException("Collection '" + collection + "' is not in the readable list. Allowed: " + readable);
         }
-
-        return formatResultSet(rows);
     }
 
-    private String executeWrite(String sql, Object[] params) {
-        int affected = params.length > 0
-                ? jdbcTemplate.update(sql, params)
-                : jdbcTemplate.update(sql);
-
-        return String.format("Write successful. Rows affected: %d", affected);
-    }
-
-    private String formatResultSet(List<Map<String, Object>> rows) {
-        if (rows.isEmpty()) return "0 rows returned.";
-
-        List<String> columns = List.copyOf(rows.get(0).keySet());
-
-        // Build column widths
-        Map<String, Integer> widths = columns.stream().collect(
-                Collectors.toMap(c -> c, c -> Math.max(c.length(),
-                        rows.stream().mapToInt(r -> {
-                            Object v = r.get(c);
-                            return v == null ? 4 : v.toString().length();
-                        }).max().orElse(0))));
-
-        StringBuilder sb = new StringBuilder();
-
-        // Header
-        columns.forEach(c -> sb.append(pad(c, widths.get(c))).append(" | "));
-        sb.append("\n");
-        columns.forEach(c -> sb.append("-".repeat(widths.get(c))).append("-+-"));
-        sb.append("\n");
-
-        // Rows
-        rows.forEach(row -> {
-            columns.forEach(c -> {
-                Object val = row.get(c);
-                String cell = val == null ? "NULL" : val.toString();
-                // Truncate long cell values
-                if (cell.length() > 80) cell = cell.substring(0, 77) + "...";
-                sb.append(pad(cell, widths.get(c))).append(" | ");
-            });
-            sb.append("\n");
-        });
-
-        sb.append("\n").append(rows.size()).append(" row(s) returned.");
-        return sb.toString();
-    }
-
-    private String pad(String s, int width) {
-        if (s.length() >= width) return s.substring(0, width);
-        return s + " ".repeat(width - s.length());
-    }
-
-    private String checkBlockedStatements(String sql) {
-        String upper = sql.toUpperCase().stripLeading();
-        for (String blocked : BLOCKED_PREFIXES) {
-            if (upper.startsWith(blocked.toUpperCase())) {
-                return "ERROR: Statement type '" + blocked + "' is not permitted. " +
-                       "Only SELECT, INSERT, and UPDATE are allowed.";
-            }
+    private void checkWritable(String collection) {
+        List<String> writable = toolProperties.getDatabase().getWritableCollectionList();
+        if (!writable.contains(collection)) {
+            throw new SecurityException("Collection '" + collection + "' is not in the writable list. Allowed: " +
+                    (writable.isEmpty() ? "[none configured]" : writable.toString()));
         }
-        return null;
     }
 
-    private StatementInfo parseStatement(String sql) {
-        Matcher m = UPDATE_PATTERN.matcher(sql);
-        if (m.find()) {
-            return new StatementInfo(m.group(1).toUpperCase(), m.group(2).toLowerCase());
+    private Document parseFilter(Map<String, Object> args) {
+        String filterJson = (String) args.getOrDefault("filter", "{}");
+        if (filterJson == null || filterJson.isBlank()) filterJson = "{}";
+        return Document.parse(filterJson);
+    }
+
+    private int resolveLimit(Object raw, int max) {
+        if (raw == null) return Math.min(20, max);
+        try {
+            return Math.min(Integer.parseInt(raw.toString()), max);
+        } catch (NumberFormatException e) {
+            return Math.min(20, max);
         }
-        m = SELECT_INSERT_PATTERN.matcher(sql);
-        if (m.find()) {
-            return new StatementInfo(m.group(1).toUpperCase(), m.group(2).toLowerCase());
-        }
-        return null;
     }
-
-    private String checkTableAllowlist(StatementInfo info) {
-        List<String> readable = toolProperties.getDatabase().getReadableTableList();
-        List<String> writable = toolProperties.getDatabase().getWritableTableList();
-
-        return switch (info.statementType()) {
-            case "SELECT" -> {
-                if (!readable.isEmpty() && !readable.contains(info.tableName())) {
-                    yield "ERROR: Table '" + info.tableName() + "' is not in the readable tables list. " +
-                          "Allowed: " + readable;
-                }
-                yield null;
-            }
-            case "INSERT", "UPDATE" -> {
-                if (!writable.contains(info.tableName())) {
-                    yield "ERROR: Table '" + info.tableName() + "' is not in the writable tables list. " +
-                          "Allowed: " + (writable.isEmpty() ? "[none configured]" : writable.toString());
-                }
-                yield null;
-            }
-            default -> "ERROR: Unsupported statement type: " + info.statementType();
-        };
-    }
-
-    @SuppressWarnings("unchecked")
-    private Object[] resolveParams(Map<String, Object> arguments) {
-        Object rawParams = arguments.get("params");
-        if (rawParams instanceof List<?> list) {
-            return list.toArray();
-        }
-        return new Object[0];
-    }
-
-    private record StatementInfo(String statementType, String tableName) {}
 }
