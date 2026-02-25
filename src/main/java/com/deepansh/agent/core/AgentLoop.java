@@ -2,6 +2,8 @@ package com.deepansh.agent.core;
 
 import com.deepansh.agent.llm.LlmClient;
 import com.deepansh.agent.memory.LongTermMemory;
+import com.deepansh.agent.memory.MemoryExtractionService;
+import com.deepansh.agent.memory.SessionService;
 import com.deepansh.agent.memory.ShortTermMemory;
 import com.deepansh.agent.model.AgentRequest;
 import com.deepansh.agent.model.AgentResponse;
@@ -39,6 +41,8 @@ public class AgentLoop {
     private final ToolRegistry toolRegistry;
     private final ShortTermMemory shortTermMemory;
     private final LongTermMemory longTermMemory;
+    private final MemoryExtractionService memoryExtractionService;
+    private final SessionService sessionService;
 
     @Value("${agent.max-iterations:10}")
     private int maxIterations;
@@ -46,11 +50,15 @@ public class AgentLoop {
     public AgentLoop(LlmClient llmClient,
                      ToolRegistry toolRegistry,
                      ShortTermMemory shortTermMemory,
-                     LongTermMemory longTermMemory) {
+                     LongTermMemory longTermMemory,
+                     MemoryExtractionService memoryExtractionService,
+                     SessionService sessionService) {
         this.llmClient = llmClient;
         this.toolRegistry = toolRegistry;
         this.shortTermMemory = shortTermMemory;
         this.longTermMemory = longTermMemory;
+        this.memoryExtractionService = memoryExtractionService;
+        this.sessionService = sessionService;
     }
 
     public AgentResponse run(AgentRequest request) {
@@ -69,7 +77,10 @@ public class AgentLoop {
                 .currentIteration(0)
                 .build();
 
-        // 1. Load existing conversation from Redis
+        // 1. Track session in PostgreSQL (upsert — increments turn count)
+        sessionService.upsertSession(sessionId, userId);
+
+        // 2. Load existing conversation from Redis
         List<Message> history = shortTermMemory.load(sessionId);
 
         if (history.isEmpty()) {
@@ -91,6 +102,9 @@ public class AgentLoop {
 
         // 3. Persist updated conversation window to Redis
         shortTermMemory.save(sessionId, context.getMessages());
+
+        // 4. Async: extract memorable facts and persist to PostgreSQL (non-blocking)
+        memoryExtractionService.extractAndStore(userId, sessionId, context.getMessages());
 
         log.info("Agent run complete [sessionId={}, iterations={}, maxReached={}]",
                 sessionId, result.getIterationsUsed(), result.isMaxIterationsReached());
