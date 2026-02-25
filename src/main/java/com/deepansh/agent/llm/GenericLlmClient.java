@@ -16,16 +16,36 @@ import org.springframework.web.client.RestClient;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * OpenAI-compatible LLM client — works with Groq, OpenAI, and Gemini.
  *
- * Accepts a RestClient.Builder so the SSL configuration (trust-all for
- * PKIX issues on certain JDK/network setups) is injected externally
- * and doesn't pollute business logic.
+ * Groq quirks handled here:
+ *
+ * 1. tool_use_failed (400): Some Groq models (including llama-3.3-70b-versatile)
+ *    sometimes emit tool calls in a broken XML format:
+ *      <function=web_search({"query": "..."})</function>
+ *    instead of the standard OpenAI JSON tool_calls array.
+ *    Groq then returns a 400 with code=tool_use_failed and includes the
+ *    broken generation in the error body.
+ *    Fix: parse the failed_generation XML and extract the tool call manually.
+ *
+ * 2. Model recommendation: use llama3-groq-70b-8192-tool-use-preview
+ *    (fine-tuned for tool use) instead of llama-3.3-70b-versatile.
+ *    Set via GROQ_MODEL env var or application.yml.
  */
 @Slf4j
 public class GenericLlmClient implements LlmClient {
+
+    // Matches Groq's broken XML tool call format:
+    // <function=tool_name({"arg": "value"})</function>
+    // <function=tool_name({"arg": "value"})>
+    private static final Pattern GROQ_XML_TOOL_PATTERN =
+            Pattern.compile("<function=(\\w+)\\((.+?)\\)(?:</function>|>)",
+                    Pattern.DOTALL);
 
     private final LlmProviderProperties props;
     private final ObjectMapper objectMapper;
@@ -53,27 +73,107 @@ public class GenericLlmClient implements LlmClient {
         log.debug("Sending {} messages to {} [model={}]",
                 messages.size(), providerName, props.getModel());
 
-        Map<String, Object> response = restClient.post()
-                .uri("/chat/completions")
-                .body(requestBody)
-                .retrieve()
-                .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
-                    String body = new String(res.getBody().readAllBytes());
-                    log.error("{} 4xx error [{}]: {}", providerName, res.getStatusCode(), body);
-                    if (res.getStatusCode().value() == 401) {
-                        throw new AgentException(
-                            providerName + " API key is invalid. Check your environment variable. Response: " + body);
-                    }
-                    throw new AgentException(providerName + " client error [" + res.getStatusCode() + "]: " + body);
-                })
-                .onStatus(HttpStatusCode::is5xxServerError, (req, res) -> {
-                    String body = new String(res.getBody().readAllBytes());
-                    log.error("{} 5xx error [{}]: {}", providerName, res.getStatusCode(), body);
-                    throw new RuntimeException(providerName + " server error [" + res.getStatusCode() + "]: " + body);
-                })
-                .body(new ParameterizedTypeReference<>() {});
+        try {
+            Map<String, Object> response = restClient.post()
+                    .uri("/chat/completions")
+                    .body(requestBody)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+                        String body = new String(res.getBody().readAllBytes());
+                        log.error("{} 4xx error [{}]: {}", providerName, res.getStatusCode(), body);
 
-        return parseResponse(response);
+                        // Groq tool_use_failed — parse the failed generation and recover
+                        if (body.contains("tool_use_failed")) {
+                            throw new GroqToolUseFailedException(body);
+                        }
+
+                        // 401 = bad API key — not retryable
+                        if (res.getStatusCode().value() == 401) {
+                            throw new AgentException(
+                                providerName + " API key is invalid. Check your environment variable.");
+                        }
+
+                        // Other 4xx — not retryable
+                        throw new AgentException(
+                            providerName + " client error [" + res.getStatusCode() + "]: " + body);
+                    })
+                    .onStatus(HttpStatusCode::is5xxServerError, (req, res) -> {
+                        String body = new String(res.getBody().readAllBytes());
+                        log.error("{} 5xx error [{}]: {}", providerName, res.getStatusCode(), body);
+                        // 5xx IS retryable — throw RuntimeException (not AgentException)
+                        throw new RuntimeException(
+                            providerName + " server error [" + res.getStatusCode() + "]: " + body);
+                    })
+                    .body(new ParameterizedTypeReference<>() {});
+
+            return parseResponse(response);
+
+        } catch (GroqToolUseFailedException e) {
+            // Try to salvage the tool call from the failed generation
+            return recoverFromGroqToolUseFailure(e.getErrorBody());
+        }
+    }
+
+    /**
+     * Groq's tool_use_failed error contains the broken generation in
+     * the "failed_generation" field. We parse it to extract the intended
+     * tool call and return it as if the call succeeded normally.
+     *
+     * Error body example:
+     * {
+     *   "error": {
+     *     "code": "tool_use_failed",
+     *     "failed_generation": "<function=web_search({\"query\": \"Spring Boot version\"})</function>"
+     *   }
+     * }
+     */
+    @SuppressWarnings("unchecked")
+    private LlmResponse recoverFromGroqToolUseFailure(String errorBody) {
+        try {
+            Map<String, Object> errorMap = objectMapper.readValue(errorBody, new TypeReference<>() {});
+            Map<String, Object> error = (Map<String, Object>) errorMap.get("error");
+            String failedGeneration  = (String) error.get("failed_generation");
+
+            if (failedGeneration == null || failedGeneration.isBlank()) {
+                log.warn("Groq tool_use_failed but no failed_generation in error body");
+                return errorResponse("The agent encountered a tool formatting issue. Please try again.");
+            }
+
+            log.debug("Attempting to recover from Groq tool_use_failed. Generation: {}", failedGeneration);
+
+            Matcher matcher = GROQ_XML_TOOL_PATTERN.matcher(failedGeneration);
+            if (!matcher.find()) {
+                log.warn("Could not parse Groq XML tool call from: {}", failedGeneration);
+                return errorResponse("The agent encountered a tool formatting issue. Please try again.");
+            }
+
+            String toolName   = matcher.group(1);
+            String argsJson   = matcher.group(2);
+
+            Map<String, Object> args = objectMapper.readValue(argsJson, new TypeReference<>() {});
+
+            log.info("Recovered Groq tool call: tool={} args={}", toolName, args);
+
+            return LlmResponse.builder()
+                    .toolCallRequired(true)
+                    .toolCall(ToolCall.builder()
+                            .id("recovered-" + UUID.randomUUID().toString().substring(0, 8))
+                            .toolName(toolName)
+                            .arguments(args)
+                            .build())
+                    .build();
+
+        } catch (Exception e) {
+            log.error("Failed to recover from Groq tool_use_failed: {}", e.getMessage());
+            return errorResponse("The agent encountered a tool formatting issue. Please try again.");
+        }
+    }
+
+    private LlmResponse errorResponse(String message) {
+        return LlmResponse.builder()
+                .toolCallRequired(false)
+                .content(message)
+                .build();
     }
 
     private Map<String, Object> buildRequestBody(List<Message> messages, List<ToolDefinition> tools) {
@@ -162,5 +262,19 @@ public class GenericLlmClient implements LlmClient {
                 .promptTokens(promptTokens)
                 .completionTokens(completionTokens)
                 .build();
+    }
+
+    /**
+     * Thrown internally when Groq returns tool_use_failed (400).
+     * Caught in the same chat() method to attempt XML recovery.
+     * Not propagated outside GenericLlmClient.
+     */
+    private static class GroqToolUseFailedException extends RuntimeException {
+        private final String errorBody;
+        GroqToolUseFailedException(String errorBody) {
+            super("Groq tool_use_failed");
+            this.errorBody = errorBody;
+        }
+        String getErrorBody() { return errorBody; }
     }
 }
