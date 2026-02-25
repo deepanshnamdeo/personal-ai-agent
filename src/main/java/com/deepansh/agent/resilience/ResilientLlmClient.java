@@ -14,21 +14,11 @@ import org.springframework.stereotype.Component;
 import java.util.List;
 
 /**
- * Decorator around OpenAiClient that adds retry + circuit breaker.
+ * Resilience decorator around the active LLM client.
  *
- * Why a decorator over annotations on OpenAiClient directly:
- * - OpenAiClient stays pure — no resilience concerns mixed into HTTP logic
- * - @Primary ensures AgentLoop gets this bean, not the raw client
- * - Fallback is explicit and testable
- *
- * Retry config (in application.yml):
- * - 3 attempts, exponential backoff: 2s → 4s → 8s
- * - Retries on network errors and 5xx; skips retry on logic errors
- *
- * Circuit breaker config:
- * - Opens after 50% failure rate in sliding window of 10 calls
- * - Waits 30s before allowing probe calls (half-open state)
- * - Counts slow calls (>30s) as failures
+ * Wraps whichever provider is active (groq / openai / gemini)
+ * with retry + circuit breaker. Provider switching is transparent —
+ * this class doesn't care which provider is underneath.
  */
 @Component
 @Primary
@@ -37,7 +27,7 @@ public class ResilientLlmClient implements LlmClient {
 
     private final LlmClient delegate;
 
-    public ResilientLlmClient(@Qualifier("openAiClient") LlmClient delegate) {
+    public ResilientLlmClient(@Qualifier("activeLlmClient") LlmClient delegate) {
         this.delegate = delegate;
     }
 
@@ -48,32 +38,24 @@ public class ResilientLlmClient implements LlmClient {
         return delegate.chat(messages, tools);
     }
 
-    /**
-     * Retry fallback — all retry attempts exhausted.
-     * Returns a structured error response the agent loop can handle.
-     */
     public LlmResponse retryFallback(List<Message> messages,
                                       List<ToolDefinition> tools,
                                       Exception ex) {
         log.error("LLM call failed after all retries: {}", ex.getMessage());
         return LlmResponse.builder()
                 .toolCallRequired(false)
-                .content("I'm temporarily unable to process your request due to a connection issue. " +
-                         "Please try again in a moment.")
+                .content("I'm temporarily unable to reach the AI service. " +
+                         "Please check your API key and try again.")
                 .build();
     }
 
-    /**
-     * Circuit breaker fallback — circuit is open, requests are short-circuited.
-     */
     public LlmResponse circuitBreakerFallback(List<Message> messages,
                                                List<ToolDefinition> tools,
                                                Exception ex) {
-        log.error("LLM circuit breaker is OPEN — rejecting call: {}", ex.getMessage());
+        log.error("LLM circuit breaker is OPEN: {}", ex.getMessage());
         return LlmResponse.builder()
                 .toolCallRequired(false)
-                .content("The AI service is currently experiencing issues. " +
-                         "Please try again in about 30 seconds.")
+                .content("The AI service is currently unavailable. Please try again in 30 seconds.")
                 .build();
     }
 }

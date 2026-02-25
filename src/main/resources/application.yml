@@ -13,10 +13,30 @@ spring:
       password: ${REDIS_PASSWORD:}
       timeout: 2000ms
 
+# ── LLM Provider ─────────────────────────────────────────────────────────────
+# Set LLM_PROVIDER env var to switch: groq | openai | gemini
+# Default is groq (free, no credit card needed)
+llm:
+  provider: ${LLM_PROVIDER:groq}
+
 openai:
-  api-key: ${OPENAI_API_KEY:dummy-key-for-compile}
+  api-key: ${OPENAI_API_KEY:}
   base-url: https://api.openai.com/v1
-  model: gpt-4o
+  model: ${OPENAI_MODEL:gpt-4o}
+  max-tokens: 4096
+  temperature: 0.2
+
+groq:
+  api-key: ${GROQ_API_KEY:}
+  base-url: https://api.groq.com/openai/v1
+  model: ${GROQ_MODEL:llama-3.3-70b-versatile}
+  max-tokens: 4096
+  temperature: 0.2
+
+gemini:
+  api-key: ${GEMINI_API_KEY:}
+  base-url: https://generativelanguage.googleapis.com/v1beta/openai
+  model: ${GEMINI_MODEL:gemini-2.0-flash}
   max-tokens: 4096
   temperature: 0.2
 
@@ -40,9 +60,7 @@ tools:
     read-timeout-ms: 10000
     allowed-domains: ${TOOL_ALLOWED_DOMAINS:}
   database:
-    # Collections the agent can query (empty = deny all)
     readable-collections: ${DB_READABLE_COLLECTIONS:agent_memories,agent_sessions}
-    # Collections the agent can insert/update into (empty = deny all)
     writable-collections: ${DB_WRITABLE_COLLECTIONS:}
     max-result-docs: 100
   file-ops:
