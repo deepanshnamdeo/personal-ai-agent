@@ -1,7 +1,9 @@
 package com.deepansh.agent.memory;
 
 import com.deepansh.agent.llm.LlmClient;
+import com.deepansh.agent.model.LlmResponse;
 import com.deepansh.agent.model.Message;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -10,23 +12,17 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
-import java.util.Map;
 
 /**
  * Automatically extracts memorable facts from a completed conversation
  * and persists them to long-term memory.
  *
- * Design decisions:
- * - Called @Async after each agent run — does NOT block the response to the user
- * - Uses a dedicated LLM call with a strict JSON-extraction prompt
- * - Only stores facts that are genuinely worth remembering (not every message)
- * - Idempotent-safe: duplicate facts are tolerable (similarity dedup is a V2 concern)
+ * Runs @Async after every agent run — never blocks the user response.
  *
- * Extraction categories (tags):
- *   "preference"  — user likes/dislikes, communication style
- *   "fact"        — stated personal/professional facts about the user
- *   "task"        — ongoing tasks or projects the user mentioned
- *   "context"     — background context that would help future sessions
+ * Key fix: validates that the LLM response is actually a JSON array
+ * BEFORE attempting to parse it. If the LLM returned a fallback/error
+ * message (e.g. circuit breaker fired), we skip extraction silently
+ * instead of crashing with JsonParseException.
  */
 @Service
 @Slf4j
@@ -37,18 +33,9 @@ public class MemoryExtractionService {
     private final LongTermMemory longTermMemory;
     private final ObjectMapper objectMapper;
 
-    /**
-     * Asynchronously extract and persist facts from a completed conversation.
-     * Called after the agent run completes — non-blocking to the user.
-     *
-     * @param userId    user to store memories under
-     * @param sessionId source session for traceability
-     * @param messages  full conversation history (excluding system message)
-     */
     @Async("memoryTaskExecutor")
     public void extractAndStore(String userId, String sessionId, List<Message> messages) {
         if (messages == null || messages.size() < 2) {
-            // Nothing worth extracting from a single-message exchange
             return;
         }
 
@@ -69,13 +56,17 @@ public class MemoryExtractionService {
                     facts.size(), userId, sessionId);
 
         } catch (Exception e) {
-            // Never let extraction failure propagate — it's best-effort
-            log.error("Memory extraction failed for session={}", sessionId, e);
+            // Never let extraction failure propagate — it's best-effort background work
+            log.error("Memory extraction failed for session={}: {}", sessionId, e.getMessage());
         }
     }
 
     private List<ExtractedFact> extractFacts(List<Message> messages) throws Exception {
         String conversationText = buildConversationText(messages);
+
+        if (conversationText.isBlank()) {
+            return List.of();
+        }
 
         String extractionPrompt = """
                 Analyze the following conversation and extract facts worth remembering about the user.
@@ -89,25 +80,23 @@ public class MemoryExtractionService {
                 DO NOT extract:
                 - Temporary or one-off requests
                 - Generic questions with no personal context
-                - Things already obvious from context
+                - Error messages or system messages
                 
-                Respond with ONLY a JSON array. No explanation, no markdown. Example:
+                Respond with ONLY a JSON array. No explanation, no markdown, no prose. Example:
                 [
                   {"content": "Works as a Java backend developer", "tag": "fact"},
-                  {"content": "Prefers bullet-point summaries", "tag": "preference"},
-                  {"content": "Currently building a microservices platform called Phoenix", "tag": "task"}
+                  {"content": "Prefers bullet-point summaries", "tag": "preference"}
                 ]
                 
                 Valid tags: fact, preference, task, context
-                
-                If there is nothing worth remembering, respond with an empty array: []
+                If nothing is worth remembering, respond with exactly: []
                 
                 Conversation:
                 """ + conversationText;
 
         Message systemMsg = Message.builder()
                 .role(Message.Role.system)
-                .content("You are a memory extraction assistant. Output only valid JSON arrays.")
+                .content("You are a memory extraction assistant. Output only valid JSON arrays. Nothing else.")
                 .build();
 
         Message userMsg = Message.builder()
@@ -115,40 +104,52 @@ public class MemoryExtractionService {
                 .content(extractionPrompt)
                 .build();
 
-        // No tools needed for extraction — pure text generation
-        var response = llmClient.chat(List.of(systemMsg, userMsg), List.of());
+        LlmResponse response = llmClient.chat(List.of(systemMsg, userMsg), List.of());
         String raw = response.getContent();
 
+        // Guard 1: null or blank response
         if (raw == null || raw.isBlank()) {
+            log.debug("LLM returned empty response during extraction — skipping");
             return List.of();
         }
 
-        // Strip any accidental markdown fences
+        // Strip markdown fences if present
         String cleaned = raw.strip()
-                .replaceAll("^```json", "")
-                .replaceAll("^```", "")
-                .replaceAll("```$", "")
+                .replaceAll("(?s)^```json\\s*", "")
+                .replaceAll("(?s)^```\\s*", "")
+                .replaceAll("(?s)```\\s*$", "")
                 .strip();
 
-        return objectMapper.readValue(cleaned, new TypeReference<List<ExtractedFact>>() {});
+        // Guard 2: response is not a JSON array (e.g. circuit breaker fallback text,
+        // or LLM returned prose instead of JSON)
+        if (!cleaned.startsWith("[")) {
+            log.warn("LLM extraction response is not a JSON array — skipping. " +
+                     "First 100 chars: '{}'", cleaned.substring(0, Math.min(100, cleaned.length())));
+            return List.of();
+        }
+
+        // Guard 3: parse defensively — catch malformed JSON without crashing
+        try {
+            return objectMapper.readValue(cleaned, new TypeReference<List<ExtractedFact>>() {});
+        } catch (JsonProcessingException e) {
+            log.warn("Failed to parse extraction JSON — skipping. Response was: '{}'. Error: {}",
+                    cleaned.substring(0, Math.min(200, cleaned.length())), e.getMessage());
+            return List.of();
+        }
     }
 
     private String buildConversationText(List<Message> messages) {
         StringBuilder sb = new StringBuilder();
         messages.forEach(m -> {
-            if (m.getRole() == Message.Role.system) return; // skip system
-            if (m.getRole() == Message.Role.tool) return;   // skip raw tool outputs
+            if (m.getRole() == Message.Role.system) return;
+            if (m.getRole() == Message.Role.tool) return;
+            if (m.getContent() == null || m.getContent().isBlank()) return;
 
             String role = m.getRole() == Message.Role.user ? "User" : "Assistant";
-            if (m.getContent() != null && !m.getContent().isBlank()) {
-                sb.append(role).append(": ").append(m.getContent()).append("\n");
-            }
+            sb.append(role).append(": ").append(m.getContent()).append("\n");
         });
         return sb.toString();
     }
 
-    /**
-     * Internal record for JSON deserialization of extracted facts.
-     */
     record ExtractedFact(String content, String tag) {}
 }

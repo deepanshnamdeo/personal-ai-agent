@@ -8,11 +8,14 @@ import com.deepansh.agent.tool.ToolDefinition;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpStatusCode;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
+import org.springframework.web.client.RestClientResponseException;
 
 import java.util.HashMap;
 import java.util.List;
@@ -34,16 +37,41 @@ public class OpenAiClient implements LlmClient {
     @Value("${openai.temperature}")
     private double temperature;
 
+    @Value("${openai.api-key}")
+    private String apiKey;
+
     public OpenAiClient(
             @Value("${openai.base-url}") String baseUrl,
             @Value("${openai.api-key}") String apiKey,
             ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+        this.apiKey = apiKey;
         this.restClient = RestClient.builder()
                 .baseUrl(baseUrl)
                 .defaultHeader("Authorization", "Bearer " + apiKey)
                 .defaultHeader("Content-Type", "application/json")
                 .build();
+    }
+
+    /**
+     * Warn loudly at startup if the API key looks invalid.
+     * Saves you 30 seconds of debugging "why is the circuit breaker open".
+     */
+    @PostConstruct
+    public void validateApiKey() {
+        if (apiKey == null || apiKey.isBlank() || apiKey.equals("dummy-key-for-compile")) {
+            log.error("================================================================");
+            log.error("  OPENAI_API_KEY is not set or is using the placeholder value.  ");
+            log.error("  Set it in IntelliJ: Run → Edit Configurations → Environment   ");
+            log.error("  Variables → OPENAI_API_KEY=sk-...                             ");
+            log.error("  The agent will return circuit breaker fallback responses.     ");
+            log.error("================================================================");
+        } else {
+            log.info("OpenAI client initialised [model={}, key={}...{}]",
+                    model,
+                    apiKey.substring(0, Math.min(7, apiKey.length())),
+                    apiKey.length() > 7 ? apiKey.substring(apiKey.length() - 4) : "");
+        }
     }
 
     @Override
@@ -53,13 +81,37 @@ public class OpenAiClient implements LlmClient {
         log.debug("Sending {} messages and {} tools to OpenAI [model={}]",
                 messages.size(), tools.size(), model);
 
-        Map<String, Object> response = restClient.post()
-                .uri("/chat/completions")
-                .body(requestBody)
-                .retrieve()
-                .body(new ParameterizedTypeReference<>() {});
+        try {
+            Map<String, Object> response = restClient.post()
+                    .uri("/chat/completions")
+                    .body(requestBody)
+                    .retrieve()
+                    .onStatus(HttpStatusCode::is4xxClientError, (req, res) -> {
+                        String body = new String(res.getBody().readAllBytes());
+                        log.error("OpenAI 4xx error [status={}]: {}", res.getStatusCode(), body);
+                        if (res.getStatusCode().value() == 401) {
+                            throw new AgentException(
+                                "OpenAI API key is invalid or missing. " +
+                                "Check your OPENAI_API_KEY environment variable. " +
+                                "Response: " + body);
+                        }
+                        throw new AgentException("OpenAI client error [" + res.getStatusCode() + "]: " + body);
+                    })
+                    .onStatus(HttpStatusCode::is5xxServerError, (req, res) -> {
+                        String body = new String(res.getBody().readAllBytes());
+                        log.error("OpenAI 5xx error [status={}]: {}", res.getStatusCode(), body);
+                        throw new RuntimeException("OpenAI server error [" + res.getStatusCode() + "]: " + body);
+                    })
+                    .body(new ParameterizedTypeReference<>() {});
 
-        return parseResponse(response);
+            return parseResponse(response);
+
+        } catch (AgentException e) {
+            throw e; // re-throw — not retryable (401, bad request)
+        } catch (RestClientResponseException e) {
+            log.error("OpenAI HTTP error [status={}]: {}", e.getStatusCode(), e.getResponseBodyAsString());
+            throw new RuntimeException("OpenAI request failed: " + e.getMessage(), e);
+        }
     }
 
     private Map<String, Object> buildRequestBody(List<Message> messages, List<ToolDefinition> tools) {
@@ -93,7 +145,6 @@ public class OpenAiClient implements LlmClient {
         } else {
             m.put("content", msg.getContent() != null ? msg.getContent() : "");
         }
-
         return m;
     }
 
@@ -104,19 +155,18 @@ public class OpenAiClient implements LlmClient {
             throw new AgentException("OpenAI returned no choices in response");
         }
 
-        // Parse token usage
         int promptTokens = 0, completionTokens = 0;
         Map<String, Object> usage = (Map<String, Object>) response.get("usage");
         if (usage != null) {
-            promptTokens    = ((Number) usage.getOrDefault("prompt_tokens", 0)).intValue();
+            promptTokens     = ((Number) usage.getOrDefault("prompt_tokens", 0)).intValue();
             completionTokens = ((Number) usage.getOrDefault("completion_tokens", 0)).intValue();
             log.debug("Token usage — prompt={} completion={} total={}",
                     promptTokens, completionTokens, promptTokens + completionTokens);
         }
 
-        Map<String, Object> choice = choices.get(0);
-        Map<String, Object> message = (Map<String, Object>) choice.get("message");
-        String finishReason = (String) choice.get("finish_reason");
+        Map<String, Object> choice     = choices.get(0);
+        Map<String, Object> message    = (Map<String, Object>) choice.get("message");
+        String              finishReason = (String) choice.get("finish_reason");
 
         log.debug("OpenAI finish_reason: {}", finishReason);
 
