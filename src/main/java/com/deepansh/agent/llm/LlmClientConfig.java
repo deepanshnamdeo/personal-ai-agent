@@ -3,24 +3,15 @@ package com.deepansh.agent.llm;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PostConstruct;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.context.annotation.Primary;
+import org.springframework.web.client.RestClient;
 
 /**
- * Selects and configures the active LLM provider bean.
- *
- * Switch providers with a single env var — no code changes:
- *   LLM_PROVIDER=groq    → Groq (free, llama-3.3-70b)   ← default
- *   LLM_PROVIDER=openai  → OpenAI (GPT-4o)
- *   LLM_PROVIDER=gemini  → Google Gemini (gemini-2.0-flash)
- *
- * All three providers expose an OpenAI-compatible REST API,
- * so the same GenericLlmClient handles all of them.
- *
- * The @Primary bean named "activeLlmClient" is what ResilientLlmClient
- * wraps — no other code needs to change when switching providers.
+ * Factory that creates the active LLM client based on LLM_PROVIDER env var.
+ * Injects the SSL-trusting RestClient.Builder to avoid PKIX errors.
  */
 @Configuration
 @Slf4j
@@ -53,75 +44,85 @@ public class LlmClientConfig {
     @PostConstruct
     public void logActiveProvider() {
         log.info("================================================================");
-        log.info("  Active LLM Provider: {}  (set LLM_PROVIDER env var to change)", provider.toUpperCase());
+        log.info("  Active LLM Provider : {}", provider.toUpperCase());
+        log.info("  Model               : {}", activeModel());
         log.info("================================================================");
     }
 
-    @Bean("openAiClient")
-    public LlmClient openAiClient(ObjectMapper objectMapper) {
-        LlmProviderProperties props = new LlmProviderProperties();
-        props.setApiKey(openAiKey);
-        props.setBaseUrl(openAiBaseUrl);
-        props.setModel(openAiModel);
-        props.setMaxTokens(openAiMaxTokens);
-        props.setTemperature(openAiTemp);
-        return new GenericLlmClient(props, objectMapper, "openai");
-    }
-
     /**
-     * The active client — picked based on LLM_PROVIDER.
-     * ResilientLlmClient @Primary decorator wraps this bean.
+     * The active LLM client — selected by LLM_PROVIDER.
+     * Wrapped by ResilientLlmClient with retry + circuit breaker.
      */
     @Bean("activeLlmClient")
-    public LlmClient activeLlmClient(ObjectMapper objectMapper) {
+    public LlmClient activeLlmClient(
+            ObjectMapper objectMapper,
+            @Qualifier("trustingRestClientBuilder") RestClient.Builder builder) {
+
         return switch (provider.toLowerCase()) {
             case "openai" -> {
-                validateKey(openAiKey, "openai", "OPENAI_API_KEY", "https://platform.openai.com/api-keys");
-                LlmProviderProperties props = new LlmProviderProperties();
-                props.setApiKey(openAiKey);
-                props.setBaseUrl(openAiBaseUrl);
-                props.setModel(openAiModel);
-                props.setMaxTokens(openAiMaxTokens);
-                props.setTemperature(openAiTemp);
-                yield new GenericLlmClient(props, objectMapper, "openai");
+                logKey("OPENAI", openAiKey, "OPENAI_API_KEY", "https://platform.openai.com/api-keys");
+                yield new GenericLlmClient(openAiProps(), objectMapper, "openai", builder.clone());
             }
             case "gemini" -> {
-                validateKey(geminiKey, "gemini", "GEMINI_API_KEY", "https://aistudio.google.com/app/apikey");
-                LlmProviderProperties props = new LlmProviderProperties();
-                props.setApiKey(geminiKey);
-                props.setBaseUrl(geminiBaseUrl);
-                props.setModel(geminiModel);
-                props.setMaxTokens(geminiMaxTokens);
-                props.setTemperature(geminiTemp);
-                yield new GenericLlmClient(props, objectMapper, "gemini");
+                logKey("GEMINI", geminiKey, "GEMINI_API_KEY", "https://aistudio.google.com/app/apikey");
+                yield new GenericLlmClient(geminiProps(), objectMapper, "gemini", builder.clone());
             }
-            default -> {  // groq
-                validateKey(groqKey, "groq", "GROQ_API_KEY", "https://console.groq.com/keys");
-                LlmProviderProperties props = new LlmProviderProperties();
-                props.setApiKey(groqKey);
-                props.setBaseUrl(groqBaseUrl);
-                props.setModel(groqModel);
-                props.setMaxTokens(groqMaxTokens);
-                props.setTemperature(groqTemp);
-                yield new GenericLlmClient(props, objectMapper, "groq");
+            default -> { // groq
+                logKey("GROQ", groqKey, "GROQ_API_KEY", "https://console.groq.com/keys");
+                yield new GenericLlmClient(groqProps(), objectMapper, "groq", builder.clone());
             }
         };
     }
 
-    private void validateKey(String key, String providerName, String envVar, String signupUrl) {
+    /**
+     * Kept for backward compat — ResilientLlmClient no longer uses this
+     * directly, but having it avoids NoSuchBeanDefinitionException if
+     * anything else references "openAiClient".
+     */
+    @Bean("openAiClient")
+    public LlmClient openAiClient(
+            ObjectMapper objectMapper,
+            @Qualifier("trustingRestClientBuilder") RestClient.Builder builder) {
+        return new GenericLlmClient(openAiProps(), objectMapper, "openai", builder.clone());
+    }
+
+    // ─── Props builders ───────────────────────────────────────────────────────
+
+    private LlmProviderProperties openAiProps() {
+        LlmProviderProperties p = new LlmProviderProperties();
+        p.setApiKey(openAiKey); p.setBaseUrl(openAiBaseUrl); p.setModel(openAiModel);
+        p.setMaxTokens(openAiMaxTokens); p.setTemperature(openAiTemp);
+        return p;
+    }
+
+    private LlmProviderProperties groqProps() {
+        LlmProviderProperties p = new LlmProviderProperties();
+        p.setApiKey(groqKey); p.setBaseUrl(groqBaseUrl); p.setModel(groqModel);
+        p.setMaxTokens(groqMaxTokens); p.setTemperature(groqTemp);
+        return p;
+    }
+
+    private LlmProviderProperties geminiProps() {
+        LlmProviderProperties p = new LlmProviderProperties();
+        p.setApiKey(geminiKey); p.setBaseUrl(geminiBaseUrl); p.setModel(geminiModel);
+        p.setMaxTokens(geminiMaxTokens); p.setTemperature(geminiTemp);
+        return p;
+    }
+
+    private String activeModel() {
+        return switch (provider.toLowerCase()) {
+            case "openai" -> openAiModel;
+            case "gemini" -> geminiModel;
+            default -> groqModel;
+        };
+    }
+
+    private void logKey(String name, String key, String envVar, String signupUrl) {
         if (key == null || key.isBlank()) {
-            log.error("================================================================");
-            log.error("  {} API key is not set!", providerName.toUpperCase());
-            log.error("  Set env var: {}=your-key", envVar);
+            log.error("  {} API key not set! Set env var: {}={your-key}", name, envVar);
             log.error("  Get a free key at: {}", signupUrl);
-            log.error("================================================================");
         } else {
-            log.info("  Model : {}", switch(providerName) {
-                case "openai" -> openAiModel;
-                case "gemini" -> geminiModel;
-                default -> groqModel;
-            });
-            log.info("  Key   : {}...{}", key.substring(0, Math.min(8, key.length())),
+            log.info("  Key: {}...{}", key.substring(0, Math.min(8, key.length())),
                     key.length() > 8 ? key.substring(key.length() - 4) : "");
         }
     }

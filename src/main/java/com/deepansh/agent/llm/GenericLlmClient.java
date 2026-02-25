@@ -18,15 +18,11 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * OpenAI-compatible LLM client.
+ * OpenAI-compatible LLM client — works with Groq, OpenAI, and Gemini.
  *
- * Works for OpenAI, Groq, and Gemini — all three expose identical
- * REST API structure at /chat/completions. The only differences are
- * the base URL, API key, and model name — all passed via LlmProviderProperties.
- *
- * This replaces the old OpenAiClient as the single implementation.
- * The old OpenAiClient bean is kept only for backward compatibility
- * with the @Qualifier("openAiClient") in ResilientLlmClient.
+ * Accepts a RestClient.Builder so the SSL configuration (trust-all for
+ * PKIX issues on certain JDK/network setups) is injected externally
+ * and doesn't pollute business logic.
  */
 @Slf4j
 public class GenericLlmClient implements LlmClient {
@@ -38,11 +34,12 @@ public class GenericLlmClient implements LlmClient {
 
     public GenericLlmClient(LlmProviderProperties props,
                              ObjectMapper objectMapper,
-                             String providerName) {
+                             String providerName,
+                             RestClient.Builder restClientBuilder) {
         this.props = props;
         this.objectMapper = objectMapper;
         this.providerName = providerName;
-        this.restClient = RestClient.builder()
+        this.restClient = restClientBuilder
                 .baseUrl(props.getBaseUrl())
                 .defaultHeader("Authorization", "Bearer " + props.getApiKey())
                 .defaultHeader("Content-Type", "application/json")
@@ -65,8 +62,7 @@ public class GenericLlmClient implements LlmClient {
                     log.error("{} 4xx error [{}]: {}", providerName, res.getStatusCode(), body);
                     if (res.getStatusCode().value() == 401) {
                         throw new AgentException(
-                            providerName + " API key is invalid. Check your environment variable. " +
-                            "Response: " + body);
+                            providerName + " API key is invalid. Check your environment variable. Response: " + body);
                     }
                     throw new AgentException(providerName + " client error [" + res.getStatusCode() + "]: " + body);
                 })
@@ -129,8 +125,8 @@ public class GenericLlmClient implements LlmClient {
             log.debug("Token usage — prompt={} completion={}", promptTokens, completionTokens);
         }
 
-        Map<String, Object> choice      = choices.get(0);
-        Map<String, Object> message     = (Map<String, Object>) choice.get("message");
+        Map<String, Object> choice       = choices.get(0);
+        Map<String, Object> message      = (Map<String, Object>) choice.get("message");
         String              finishReason = (String) choice.get("finish_reason");
 
         log.debug("{} finish_reason: {}", providerName, finishReason);
